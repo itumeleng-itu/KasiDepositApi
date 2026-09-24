@@ -1,7 +1,8 @@
 """Settings, read from the environment (and `.env` at the project root).
 
 `DATABASE_URL` and `ENVIRONMENT` have no defaults: if either is missing the
-app refuses to start. Test-only variables (`TEST_DATABASE_URL`,
+app refuses to start. `ENABLE_DEMO_ROUTES` defaults to true only in
+development, and production refuses to start with it switched on. Test-only variables (`TEST_DATABASE_URL`,
 `TEST_DATABASE_SCHEMA`) are deliberately *not* settings here — only the test
 suite reads them (see `tests/conftest.py`), so a production deployment never
 needs them.
@@ -10,9 +11,9 @@ needs them.
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
@@ -63,6 +64,10 @@ class Settings(BaseSettings):
     # The Postgres schema the app's tables live in. The test suite overrides it
     # so tests can share a database with development without touching its data.
     database_schema: str = "public"
+    # Unset means "on in development, off everywhere else"; see demo_routes_enabled.
+    enable_demo_routes: bool | None = None
+    min_voucher_cents: int = Field(default=1000, gt=0)
+    max_voucher_cents: int = Field(default=500000, gt=0)
 
     @field_validator("database_url")
     @classmethod
@@ -73,6 +78,23 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_database_schema(cls, value: str) -> str:
         return validate_schema_name(value)
+
+    @model_validator(mode="after")
+    def _check_consistency(self) -> Self:
+        if self.environment == "production" and self.enable_demo_routes:
+            raise ValueError(
+                "ENABLE_DEMO_ROUTES must not be true in production: the demo "
+                "routes vend vouchers and stand in for an issuer's terminal"
+            )
+        if self.min_voucher_cents > self.max_voucher_cents:
+            raise ValueError("MIN_VOUCHER_CENTS must not exceed MAX_VOUCHER_CENTS")
+        return self
+
+    @property
+    def demo_routes_enabled(self) -> bool:
+        if self.enable_demo_routes is None:
+            return self.environment == "development"
+        return self.enable_demo_routes
 
 
 @lru_cache

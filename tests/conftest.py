@@ -85,6 +85,10 @@ def test_settings(pytestconfig: pytest.Config) -> Settings:
         database_url=pytestconfig.stash[_TEST_URL_KEY],
         database_schema=pytestconfig.stash[_TEST_SCHEMA_KEY],
         environment="test",
+        # Off by default outside development; the route tests need them on.
+        enable_demo_routes=True,
+        min_voucher_cents=1000,
+        max_voucher_cents=500000,
     )
 
 

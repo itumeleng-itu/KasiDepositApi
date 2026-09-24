@@ -106,3 +106,44 @@ def test_connections_are_pinned_to_the_test_schema(
     with clean_db.connect() as conn:
         current = conn.execute(text("SELECT current_schema()")).scalar_one()
     assert current == test_settings.database_schema
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [("development", True), ("test", False), ("production", False)],
+)
+def test_demo_routes_default_on_only_in_development(
+    monkeypatch: pytest.MonkeyPatch, environment: str, expected: bool
+) -> None:
+    monkeypatch.delenv("ENABLE_DEMO_ROUTES", raising=False)
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    assert Settings(_env_file=None).demo_routes_enabled is expected
+
+
+def test_demo_routes_can_be_switched_off_in_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("ENABLE_DEMO_ROUTES", "false")
+    assert Settings(_env_file=None).demo_routes_enabled is False
+
+
+def test_production_refuses_demo_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ENABLE_DEMO_ROUTES", "true")
+    with pytest.raises(ValidationError, match="must not be true in production"):
+        Settings(_env_file=None)
+
+
+def test_voucher_limits_default_and_must_be_ordered(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.delenv("MIN_VOUCHER_CENTS", raising=False)
+    monkeypatch.delenv("MAX_VOUCHER_CENTS", raising=False)
+    settings = Settings(_env_file=None)
+    assert (settings.min_voucher_cents, settings.max_voucher_cents) == (1000, 500000)
+
+    monkeypatch.setenv("MIN_VOUCHER_CENTS", "600000")
+    with pytest.raises(ValidationError, match="MIN_VOUCHER_CENTS"):
+        Settings(_env_file=None)

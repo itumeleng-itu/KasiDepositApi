@@ -83,4 +83,9 @@ class Voucher(Base):
             "status",
             postgresql_where=text("status = 'active'"),
         ),
+        # The demo till lists the most recent vouchers.
+        Index("ix_vouchers_issued_at", "issued_at"),
     )
+    # Fetch server defaults (issued_at) with RETURNING on insert, rather than
+    # a second SELECT when they are first read.
+    __mapper_args__ = {"eager_defaults": True}
