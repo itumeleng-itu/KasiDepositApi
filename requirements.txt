@@ -1,0 +1,13 @@
+# Runtime
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0,<2.1
+psycopg>=3.2,<4   # pure-Python impl; loads the system libpq (see README)
+alembic>=1.13,<2
+pydantic>=2.7,<3
+pydantic-settings>=2.4,<3
+tzdata>=2024.1
+
+# Development
+pytest>=8
+httpx2>=2.13
