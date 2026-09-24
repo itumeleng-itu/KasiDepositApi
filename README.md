@@ -222,10 +222,10 @@ generates `DEMO_API_KEY` itself.
 | Setting | Value |
 |---|---|
 | Region | Frankfurt, next to the Supabase database (`eu-central-1`) |
-| Plan | Starter. Pre-deploy commands need a paid instance, and a free one sleeps when idle, making the first request slower than the app's 15-second timeout. |
+| Plan | Free. It sleeps after 15 minutes without traffic and takes about a minute to wake, longer than the app's 15-second timeout: open `/health` before a demo, or ping it every ~10 minutes to keep it awake. |
 | Branch | `main` |
 | Build | `pip install -r requirements.txt`, which gets `psycopg[binary]` on Linux |
-| Before each deploy | `python -m alembic upgrade head` |
+| Migrations | Not run on deploy (the free plan has no pre-deploy command). Run `python -m alembic upgrade head` from your machine before deploying a version that adds one; startup refuses an out-of-date schema. |
 | Start | `python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"` |
 | Health check | `/health` |
 

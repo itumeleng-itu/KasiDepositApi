@@ -8,15 +8,18 @@ services:
     # Same region as the Supabase database (eu-central-1): every request makes
     # several database round trips, ~1 ms each in-region instead of ~180 ms.
     region: frankfurt
-    # A paid instance: pre-deploy commands (the migrations below) need one, and
-    # a free instance sleeps when idle, so the first request after a pause can
-    # take longer than the app's 15-second timeout.
-    plan: starter
+    # Free instance. What that means for this service:
+    # - No pre-deploy command, so migrations do not run on deploy. Run
+    #   `python -m alembic upgrade head` from a machine with DATABASE_URL
+    #   before deploying a version that adds one. If you forget, startup
+    #   refuses the out-of-date schema with a clear message (app/schema_check.py)
+    #   rather than serving errors.
+    # - It sleeps after 15 minutes without traffic and takes about a minute to
+    #   wake, longer than the app's 15-second request timeout. Before a demo,
+    #   open /health first, or ping /health every ~10 minutes to keep it awake.
+    plan: free
     branch: main
     buildCommand: pip install -r requirements.txt
-    # Migrate before the new version starts. Startup also refuses a schema that
-    # is behind the code, so a skipped migration fails loudly, not with 500s.
-    preDeployCommand: python -m alembic upgrade head
     startCommand: python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"
     healthCheckPath: /health
     envVars:
