@@ -3,9 +3,12 @@
     python seed.py --count 20
     python seed.py --reset            # shows what would be deleted, deletes nothing
     python seed.py --reset --yes --count 20
+    python seed.py --fund 10000       # top up the settlement float by R10 000
+    python seed.py --reset --yes --fund 10000 --count 20
 
 --reset clears all demo data: vouchers, deposits, payouts, voucher tokens and
-the whole ledger, including the float.
+the whole ledger, including the float. --fund posts `settlement +X, capital -X`
+through the ledger; on its own it vends nothing (add --count to vend too).
 
 Refuses to run unless ENVIRONMENT=development. Vouchers are vended through
 VoucherSwitch, exactly as the demo till does; full PINs are printed so they
@@ -23,7 +26,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db import make_engine, make_session_factory
-from app.models import Base, Deposit, LedgerEntry, Payout, Voucher, VoucherToken
+from app.ledger import balance_of, fund_float
+from app.models import Base, Deposit, LedgerAccount, LedgerEntry, Payout, Voucher, VoucherToken
 from app.money import format_rand, rand_to_cents
 from app.switch import VendedVoucher, VoucherSwitch
 
@@ -37,11 +41,30 @@ MAX_COUNT = 1000
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Vend demo vouchers into the development database.")
-    parser.add_argument("--count", type=int, default=20, help=f"vouchers to vend (1-{MAX_COUNT}, default 20)")
-    parser.add_argument("--reset", action="store_true", help="delete all vouchers first (needs --yes)")
+    parser.add_argument(
+        "--count",
+        type=int,
+        default=None,
+        help=f"vouchers to vend (1-{MAX_COUNT}; default 20, or none when only funding)",
+    )
+    parser.add_argument("--reset", action="store_true", help="delete all demo data first (needs --yes)")
     parser.add_argument("--yes", action="store_true", help="confirm --reset")
+    parser.add_argument(
+        "--fund", metavar="RAND", default=None, help="top up the settlement float, e.g. 10000"
+    )
     args = parser.parse_args(argv)
-    if not 1 <= args.count <= MAX_COUNT:
+    if args.fund is not None:
+        try:
+            args.fund_cents = rand_to_cents(args.fund)
+        except (TypeError, ValueError):
+            parser.error(f"--fund must be a rand amount, got {args.fund!r}")
+        if args.fund_cents <= 0:
+            parser.error("--fund must be positive")
+    else:
+        args.fund_cents = None
+    if args.count is None:
+        args.count = 0 if args.fund_cents is not None else 20
+    elif not 1 <= args.count <= MAX_COUNT:
         parser.error(f"--count must be between 1 and {MAX_COUNT}")
     return args
 
@@ -83,10 +106,17 @@ def run(
             session.execute(text(f"TRUNCATE {tables}"))
             print(f"Deleted {summary}.", file=out)
 
+        if args.fund_cents is not None:
+            fund_float(session, args.fund_cents)
         vended = [switch.vend(session, secrets.choice(amounts)) for _ in range(args.count)]
         session.commit()
+        float_cents = balance_of(session, LedgerAccount.SETTLEMENT)
 
-    _print_table(vended, out)
+    if vended:
+        _print_table(vended, out)
+    if args.fund_cents is not None:
+        print(f"\nFloat topped up by {format_rand(args.fund_cents)}.", file=out)
+    print(f"Settlement float balance: {format_rand(float_cents)}.", file=out)
     return 0
 
 

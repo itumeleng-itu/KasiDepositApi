@@ -176,6 +176,25 @@ def test_an_unbalanced_entry_group_cannot_be_committed(db_session: Session) -> N
         db_session.commit()
 
 
+def test_a_lone_funding_entry_without_a_counterparty_cannot_be_committed(
+    db_session: Session,
+) -> None:
+    # The CHECK lets funding entries omit deposit_id, so the zero-sum trigger is
+    # the only thing stopping a float top-up that creates money from nothing.
+    _entries(db_session, None, ("settlement", 1_000_000))
+    with pytest.raises(IntegrityError, match="does not sum to zero"):
+        db_session.commit()
+
+
+def test_a_balanced_funding_entry_without_a_deposit_commits(db_session: Session) -> None:
+    group = _entries(db_session, None, ("settlement", 1_000_000), ("capital", -1_000_000))
+    db_session.commit()
+    total = db_session.execute(
+        text("SELECT sum(amount_cents) FROM ledger_entries WHERE entry_group = :g"), {"g": group}
+    ).scalar_one()
+    assert total == 0
+
+
 def _committed_entry(db_session: Session) -> int:
     group = _entries(db_session, None, ("settlement", 500), ("capital", -500))
     db_session.commit()

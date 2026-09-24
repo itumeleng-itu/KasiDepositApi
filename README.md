@@ -119,3 +119,7 @@ The suite migrates `TEST_SCHEMA` itself and never touches `DEV_SCHEMA`.
 - Schema changes are Alembic migrations, never `create_all`.
 - Every table must enable row-level security (see migration `0003`): hosted
   providers expose `public` to a public API key otherwise. A test enforces it.
+
+## Known tech debt
+
+- The four check constraints on `vouchers` (migration `0001`) have a doubled name prefix, such as `ck_vouchers_ck_vouchers_pin_format`. They work; the names are cosmetic, and renaming them isn't worth a migration before the demo.
