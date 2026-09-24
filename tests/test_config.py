@@ -1,55 +1,79 @@
+import os
+import subprocess
+import sys
+
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
 
 from app.config import Settings, normalize_database_url
-from app.db import same_database
-from tests.conftest import DEFAULT_TEST_SCHEMA, check_test_database
+from tests.conftest import PROJECT_ROOT, check_schemas
 
 DEV = "postgresql://kd:secret@localhost:5432/kasideposit"
-TEST = "postgresql://kd:secret@localhost:5432/kasideposit_test"
 
 
-def test_guard_aborts_when_test_url_equals_database_url_and_schema() -> None:
-    with pytest.raises(pytest.UsageError, match="destroy development data"):
-        check_test_database(DEV, "public", DEV, "public")
-
-
-def test_guard_sees_through_driver_and_password_differences() -> None:
-    disguised = "postgresql+psycopg://kd:other@LOCALHOST/kasideposit?sslmode=require"
-    with pytest.raises(pytest.UsageError, match="destroy development data"):
-        check_test_database(disguised, "public", DEV, "public")
-
-
-def test_guard_allows_same_database_in_a_separate_schema() -> None:
-    assert check_test_database(DEV, DEFAULT_TEST_SCHEMA, DEV, "public").startswith(
-        "postgresql+psycopg://"
+def test_guard_aborts_when_test_schema_equals_dev_schema() -> None:
+    with pytest.raises(pytest.UsageError) as excinfo:
+        check_schemas("public", "public")
+    assert str(excinfo.value) == (
+        "TEST_SCHEMA and DEV_SCHEMA are both 'public'. "
+        "The test suite truncates tables and would destroy the seeded demo vouchers. "
+        "Refusing to run."
     )
 
 
-def test_guard_falls_back_to_database_url_only_with_a_separate_schema() -> None:
-    assert check_test_database(None, DEFAULT_TEST_SCHEMA, DEV) == normalize_database_url(DEV)
-    with pytest.raises(pytest.UsageError, match="destroy development data"):
-        check_test_database(None, "public", DEV)
+def test_guard_allows_distinct_schemas() -> None:
+    check_schemas("kd_test", "public")
 
 
-def test_guard_aborts_with_no_database_at_all() -> None:
-    with pytest.raises(pytest.UsageError, match="no database to test against"):
-        check_test_database(None, DEFAULT_TEST_SCHEMA, None)
+def _run_pytest(*args: str, **env: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", *args],
+        cwd=PROJECT_ROOT,
+        env={**os.environ, **env},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
 
 
-def test_guard_rejects_unsafe_schema_name() -> None:
-    with pytest.raises(pytest.UsageError, match="TEST_DATABASE_SCHEMA"):
-        check_test_database(TEST, 'x"; drop schema public; --', DEV)
+def test_conftest_refuses_to_run_when_schemas_match() -> None:
+    # A real pytest run, so this checks the wiring, not just the helper.
+    result = _run_pytest("tests/test_money.py", TEST_SCHEMA="public", DEV_SCHEMA="public")
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "would destroy the seeded demo vouchers" in result.stderr
 
 
-def test_guard_passes_distinct_databases() -> None:
-    assert check_test_database(TEST, "public", DEV).startswith("postgresql+psycopg://")
+def test_a_second_concurrent_run_is_refused(exclusive_test_run: Connection) -> None:
+    # This run holds the TEST_SCHEMA lock; a second run must stop, not interleave.
+    result = _run_pytest("tests/test_health.py::test_health_ok")
+    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    assert "Another test run is already using TEST_SCHEMA" in result.stdout + result.stderr
 
 
-def test_same_database_distinguishes_pooler_tenants() -> None:
-    pooler = "postgresql://postgres.{ref}:pw@aws-0-eu-west-1.pooler.supabase.com:5432/postgres"
-    assert not same_database(pooler.format(ref="aaa"), pooler.format(ref="bbb"))
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [("development", "public"), ("production", "public"), ("test", "kd_test")],
+)
+def test_environment_picks_the_schema(
+    monkeypatch: pytest.MonkeyPatch, environment: str, expected: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", environment)
+    monkeypatch.delenv("DEV_SCHEMA", raising=False)
+    monkeypatch.delenv("TEST_SCHEMA", raising=False)
+    assert Settings(_env_file=None).active_schema == expected
+
+
+@pytest.mark.parametrize("variable", ["DEV_SCHEMA", "TEST_SCHEMA"])
+def test_schema_names_must_be_plain_identifiers(
+    monkeypatch: pytest.MonkeyPatch, variable: str
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv(variable, 'x"; drop schema public; --')
+    with pytest.raises(ValidationError, match="invalid schema name"):
+        Settings(_env_file=None)
 
 
 def test_normalize_database_url() -> None:
@@ -100,12 +124,18 @@ def test_settings_reject_unknown_environment(monkeypatch: pytest.MonkeyPatch) ->
         Settings(_env_file=None)
 
 
-def test_connections_are_pinned_to_the_test_schema(
+def test_every_connection_is_set_up_for_the_test_schema_with_timeouts(
     clean_db: Engine, test_settings: Settings
 ) -> None:
     with clean_db.connect() as conn:
-        current = conn.execute(text("SELECT current_schema()")).scalar_one()
-    assert current == test_settings.database_schema
+        row = conn.execute(
+            text(
+                "SELECT current_schema(), current_setting('statement_timeout'),"
+                " current_setting('lock_timeout'),"
+                " current_setting('idle_in_transaction_session_timeout')"
+            )
+        ).one()
+    assert tuple(row) == (test_settings.test_schema, "30s", "5s", "10s")
 
 
 @pytest.mark.parametrize(
@@ -128,11 +158,30 @@ def test_demo_routes_can_be_switched_off_in_development(monkeypatch: pytest.Monk
     assert Settings(_env_file=None).demo_routes_enabled is False
 
 
-def test_production_refuses_demo_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_production_refuses_demo_routes_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", DEV)
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("ENABLE_DEMO_ROUTES", "true")
-    with pytest.raises(ValidationError, match="must not be true in production"):
+    monkeypatch.delenv("DEMO_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match="needs DEMO_API_KEY"):
+        Settings(_env_file=None)
+
+
+def test_production_allows_demo_routes_behind_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ENABLE_DEMO_ROUTES", "true")
+    monkeypatch.setenv("DEMO_API_KEY", "k" * 32)
+    settings = Settings(_env_file=None)
+    assert settings.demo_routes_enabled
+    assert "k" * 32 not in repr(settings)  # the key never reaches logs
+
+
+def test_a_short_demo_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("DEMO_API_KEY", "too-short")
+    with pytest.raises(ValidationError, match="demo_api_key"):
         Settings(_env_file=None)
 
 

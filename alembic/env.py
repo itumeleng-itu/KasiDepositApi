@@ -1,20 +1,21 @@
 """Alembic environment.
 
-The database URL and schema come from the Alembic config when a caller sets
-them (the test suite does, to target its own schema), otherwise from app
-settings (DATABASE_URL, schema `public`). alembic.ini never holds a URL.
+Migrates the schema named by ENVIRONMENT: TEST_SCHEMA under test, DEV_SCHEMA
+in development and production (see `Settings.active_schema`). The test suite
+passes its own Settings in `config.attributes["settings"]`; otherwise they
+come from the environment. alembic.ini never holds a URL.
 
-Migrations run with `search_path` pinned to the target schema, and the
-`alembic_version` table lives in that schema too, so each schema carries its
-own independent migration history.
+`alembic_version` lives in the migrated schema (`version_table_schema`), so
+each schema keeps its own migration history. The connection comes from
+`make_engine`, so migrations get the same search_path and timeouts as the app.
 """
 
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool, text
 
-from app.config import get_settings, normalize_database_url, validate_schema_name
+from app.config import Settings, get_settings
+from app.db import make_engine, session_setup_sql
 from app.models import Base
 
 config = context.config
@@ -25,43 +26,39 @@ if config.config_file_name is not None and config.attributes.get("configure_logg
 target_metadata = Base.metadata
 
 
-def _database_url_and_schema() -> tuple[str, str]:
-    override = config.get_main_option("sqlalchemy.url")
-    if override:
-        schema = config.get_main_option("kasideposit.schema") or "public"
-        return normalize_database_url(override), validate_schema_name(schema)
-    settings = get_settings()
-    return settings.database_url, settings.database_schema
+def _settings() -> Settings:
+    settings = config.attributes.get("settings")
+    return settings if isinstance(settings, Settings) else get_settings()
 
 
 def run_migrations_offline() -> None:
-    url, schema = _database_url_and_schema()
+    settings = _settings()
     context.configure(
-        url=url,
+        url=settings.database_url,
         target_metadata=target_metadata,
-        version_table_schema=schema,
+        version_table_schema=settings.active_schema,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
     with context.begin_transaction():
-        context.execute(f'SET search_path TO "{schema}"')
+        context.execute(session_setup_sql(settings.active_schema))
         context.run_migrations()
 
 
 def run_migrations_online() -> None:
-    url, schema = _database_url_and_schema()
-    engine = create_engine(url, poolclass=pool.NullPool)
-    with engine.connect() as connection:
-        connection.execute(text(f'SET search_path TO "{schema}"'))
-        connection.commit()
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            version_table_schema=schema,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
-    engine.dispose()
+    settings = _settings()
+    engine = make_engine(settings.database_url, settings.active_schema)
+    try:
+        with engine.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                version_table_schema=settings.active_schema,
+            )
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        engine.dispose()
 
 
 if context.is_offline_mode():

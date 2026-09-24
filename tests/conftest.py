@@ -1,14 +1,16 @@
-"""Test fixtures. Tests run in their own Postgres schema and nothing else.
+"""Test fixtures. One database, and the tests work only in TEST_SCHEMA.
 
-- The database is TEST_DATABASE_URL, or DATABASE_URL when that is unset (one
-  database may serve both). If neither is set the run aborts.
-- Tests live in the schema TEST_DATABASE_SCHEMA (default `kasideposit_test`),
-  with their own tables, enum types and migration history.
-- If the test database *and* schema are the same as the app's, the run
-  aborts: the suite truncates tables, and would wipe seeded demo vouchers.
-- Migrations run once per session. Tables are truncated before each test that
-  touches the database. The database itself is never dropped or created, since
-  a hosted provider may not permit it; only the test schema is created if missing.
+- Settings come from the environment with ENVIRONMENT forced to "test", so
+  every connection's search_path is TEST_SCHEMA (default `kd_test`).
+- The run aborts if TEST_SCHEMA equals DEV_SCHEMA: the suite truncates tables
+  and would destroy the seeded demo vouchers.
+- Only one test run may use TEST_SCHEMA at a time. The suite truncates before
+  every database test, so two concurrent runs silently delete each other's
+  rows mid-test and fail at random. A Postgres advisory lock, held for the
+  whole session, makes a second run abort at once instead.
+- Migrations run once per session. The database itself is never dropped or
+  created (a hosted provider may not permit it); only TEST_SCHEMA is created
+  if missing.
 """
 
 from collections.abc import Iterator
@@ -18,95 +20,98 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import Engine, text
+from pydantic import ValidationError
+from sqlalchemy import Connection, Engine, func, select, text
 from sqlalchemy.orm import Session
 
-from app.config import ENV_FILE, Settings, normalize_database_url, validate_schema_name
-from app.db import make_engine, make_session_factory, same_database
+from app.config import Settings
+from app.db import make_engine, make_session_factory
 from app.main import create_app
-from app.models import Base
+from app.models import Base, LedgerEntry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TEST_SCHEMA = "kasideposit_test"
 
 
-class _TestEnv(BaseSettings):
-    """Reads the variables the same way the app does (environment, then .env)."""
-
-    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
-
-    test_database_url: str | None = None
-    test_database_schema: str = DEFAULT_TEST_SCHEMA
-    database_url: str | None = None
-    database_schema: str = "public"
-
-
-def check_test_database(
-    test_url: str | None,
-    test_schema: str,
-    dev_url: str | None,
-    dev_schema: str = "public",
-) -> str:
-    """Return the database URL to test against, or raise pytest.UsageError to abort."""
-    url = test_url or dev_url
-    if not url:
+def check_schemas(test_schema: str, dev_schema: str) -> None:
+    """Abort the run (pytest.UsageError) if tests would run in the app's schema."""
+    if test_schema == dev_schema:
         raise pytest.UsageError(
-            "Neither TEST_DATABASE_URL nor DATABASE_URL is set; there is no database to test against."
-        )
-    try:
-        validate_schema_name(test_schema)
-    except ValueError as exc:
-        raise pytest.UsageError(f"TEST_DATABASE_SCHEMA: {exc}") from exc
-    if dev_url and same_database(url, dev_url) and test_schema == dev_schema:
-        raise pytest.UsageError(
-            f"The test schema {test_schema!r} is the app's own schema in the same database. "
-            "The test suite truncates tables and would destroy development data. "
+            f"TEST_SCHEMA and DEV_SCHEMA are both {test_schema!r}. "
+            "The test suite truncates tables and would destroy the seeded demo vouchers. "
             "Refusing to run."
         )
-    return normalize_database_url(url)
 
 
-_TEST_URL_KEY = pytest.StashKey[str]()
-_TEST_SCHEMA_KEY = pytest.StashKey[str]()
+def load_test_settings() -> Settings:
+    try:
+        settings = Settings(
+            environment="test",
+            # Off by default outside development; the route tests need them on.
+            enable_demo_routes=True,
+            min_voucher_cents=1000,
+            max_voucher_cents=500000,
+        )
+    except ValidationError as exc:
+        raise pytest.UsageError(f"Cannot load settings for the test run:\n{exc}") from exc
+    check_schemas(settings.test_schema, settings.dev_schema)
+    return settings
+
+
+_SETTINGS_KEY = pytest.StashKey[Settings]()
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    env = _TestEnv()
-    config.stash[_TEST_URL_KEY] = check_test_database(
-        env.test_database_url, env.test_database_schema, env.database_url, env.database_schema
-    )
-    config.stash[_TEST_SCHEMA_KEY] = env.test_database_schema
+    config.stash[_SETTINGS_KEY] = load_test_settings()
 
 
 @pytest.fixture(scope="session")
 def test_settings(pytestconfig: pytest.Config) -> Settings:
-    return Settings(
-        database_url=pytestconfig.stash[_TEST_URL_KEY],
-        database_schema=pytestconfig.stash[_TEST_SCHEMA_KEY],
-        environment="test",
-        # Off by default outside development; the route tests need them on.
-        enable_demo_routes=True,
-        min_voucher_cents=1000,
-        max_voucher_cents=500000,
-    )
+    return pytestconfig.stash[_SETTINGS_KEY]
 
 
 @pytest.fixture(scope="session")
 def alembic_config(test_settings: Settings) -> Config:
     cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
     cfg.attributes["configure_logger"] = False
-    # configparser treats % as interpolation; escape it (passwords may contain one).
-    cfg.set_main_option("sqlalchemy.url", test_settings.database_url.replace("%", "%%"))
-    cfg.set_main_option("kasideposit.schema", test_settings.database_schema)
+    cfg.attributes["settings"] = test_settings
     return cfg
 
 
+RUN_LOCK_SQL = text("SELECT pg_try_advisory_lock(hashtext('kasideposit-tests:' || :schema))")
+
+
 @pytest.fixture(scope="session")
-def engine(test_settings: Settings, alembic_config: Config) -> Iterator[Engine]:
-    eng = make_engine(test_settings.database_url, test_settings.database_schema)
+def exclusive_test_run(test_settings: Settings) -> Iterator[Connection]:
+    """Hold a session-level advisory lock on TEST_SCHEMA for the whole run.
+
+    The lock is taken outside any transaction, so the connection sits idle
+    (not idle-in-transaction) and the idle-transaction timeout never ends it.
+    """
+    eng = make_engine(test_settings.database_url, test_settings.active_schema)
+    conn = eng.connect()
+    acquired = conn.execute(RUN_LOCK_SQL, {"schema": test_settings.active_schema}).scalar_one()
+    conn.commit()
+    if not acquired:
+        conn.close()
+        eng.dispose()
+        pytest.exit(
+            f"Another test run is already using TEST_SCHEMA {test_settings.active_schema!r}. "
+            "Two runs truncating the same schema delete each other's rows mid-test. "
+            "Wait for it to finish, or give this run its own TEST_SCHEMA.",
+            returncode=pytest.ExitCode.USAGE_ERROR,
+        )
+    yield conn
+    conn.close()
+    eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def engine(
+    test_settings: Settings, alembic_config: Config, exclusive_test_run: Connection
+) -> Iterator[Engine]:
+    eng = make_engine(test_settings.database_url, test_settings.active_schema)
     with eng.begin() as conn:
-        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{test_settings.database_schema}"'))
+        conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{test_settings.active_schema}"'))
     command.upgrade(alembic_config, "head")
 
     yield eng
@@ -115,7 +120,7 @@ def engine(test_settings: Settings, alembic_config: Config) -> Iterator[Engine]:
 
 @pytest.fixture
 def clean_db(engine: Engine) -> Engine:
-    """Truncate every application table in the test schema before the test runs."""
+    """Truncate every application table in TEST_SCHEMA before the test runs."""
     tables = ", ".join(f'"{t.name}"' for t in Base.metadata.sorted_tables)
     if tables:
         with engine.begin() as conn:
@@ -133,3 +138,15 @@ def db_session(clean_db: Engine) -> Iterator[Session]:
 def client(clean_db: Engine, test_settings: Settings) -> Iterator[TestClient]:
     with TestClient(create_app(test_settings)) as c:
         yield c
+
+
+def assert_ledger_balanced(session: Session) -> None:
+    """The whole ledger sums to zero, and so does every entry_group in it."""
+    total = session.scalar(select(func.coalesce(func.sum(LedgerEntry.amount_cents), 0)))
+    assert total == 0
+    unbalanced = session.execute(
+        select(LedgerEntry.entry_group)
+        .group_by(LedgerEntry.entry_group)
+        .having(func.sum(LedgerEntry.amount_cents) != 0)
+    ).all()
+    assert unbalanced == []
