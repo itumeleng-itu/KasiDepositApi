@@ -4,7 +4,7 @@ The money story
 ---------------
 A person hands R500 cash to a spaza shop and receives a voucher PIN. That cash
 is now the shop's, and reaches the voucher issuer through the issuer's own
-settlement cycle. It never passes through us.
+settlement cycle, not through us.
 
 When she redeems the PIN with us, we owe her R495 (R500 less our R5 fee)
 immediately, but the issuer has not paid us yet. So the R495 goes out of a
