@@ -89,19 +89,21 @@ def test_settings(pytestconfig: pytest.Config) -> Settings:
 
 
 @pytest.fixture(scope="session")
-def engine(test_settings: Settings) -> Iterator[Engine]:
+def alembic_config(test_settings: Settings) -> Config:
+    cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
+    cfg.attributes["configure_logger"] = False
+    # configparser treats % as interpolation; escape it (passwords may contain one).
+    cfg.set_main_option("sqlalchemy.url", test_settings.database_url.replace("%", "%%"))
+    cfg.set_main_option("kasideposit.schema", test_settings.database_schema)
+    return cfg
+
+
+@pytest.fixture(scope="session")
+def engine(test_settings: Settings, alembic_config: Config) -> Iterator[Engine]:
     eng = make_engine(test_settings.database_url, test_settings.database_schema)
     with eng.begin() as conn:
         conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{test_settings.database_schema}"'))
-
-    alembic_cfg = Config(str(PROJECT_ROOT / "alembic.ini"))
-    alembic_cfg.attributes["configure_logger"] = False
-    # configparser treats % as interpolation; escape it (passwords may contain one).
-    alembic_cfg.set_main_option(
-        "sqlalchemy.url", test_settings.database_url.replace("%", "%%")
-    )
-    alembic_cfg.set_main_option("kasideposit.schema", test_settings.database_schema)
-    command.upgrade(alembic_cfg, "head")
+    command.upgrade(alembic_config, "head")
 
     yield eng
     eng.dispose()
