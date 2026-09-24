@@ -13,8 +13,11 @@ from seed import DEMO_AMOUNTS_RAND, parse_args, run
 
 @pytest.fixture
 def dev_settings(test_settings: Settings) -> Settings:
-    # Development rules, but still pointed at the test schema.
-    return test_settings.model_copy(update={"environment": "development"})
+    # Development rules, but every schema still points at TEST_SCHEMA: switching
+    # ENVIRONMENT alone would select DEV_SCHEMA, the seeded demo data.
+    return test_settings.model_copy(
+        update={"environment": "development", "dev_schema": test_settings.test_schema}
+    )
 
 
 def _count(engine: Engine) -> int:
@@ -41,7 +44,11 @@ def test_seed_refuses_outside_development(
     clean_db: Engine, test_settings: Settings, environment: str
 ) -> None:
     settings = test_settings.model_copy(
-        update={"environment": environment, "enable_demo_routes": False}
+        update={
+            "environment": environment,
+            "enable_demo_routes": False,
+            "dev_schema": test_settings.test_schema,
+        }
     )
     out = io.StringIO()
     assert run(parse_args(["--count", "3"]), settings, make_session_factory(clean_db), out) == 1
@@ -51,7 +58,8 @@ def test_seed_refuses_outside_development(
 
 def test_reset_without_yes_deletes_nothing(clean_db: Engine, dev_settings: Settings) -> None:
     factory = make_session_factory(clean_db)
-    run(parse_args(["--count", "2"]), dev_settings, factory, io.StringIO())
+    assert run(parse_args(["--count", "2"]), dev_settings, factory, io.StringIO()) == 0
+    assert _count(clean_db) == 2
 
     out = io.StringIO()
     assert run(parse_args(["--reset", "--count", "3"]), dev_settings, factory, out) == 1
@@ -61,7 +69,8 @@ def test_reset_without_yes_deletes_nothing(clean_db: Engine, dev_settings: Setti
 
 def test_reset_with_yes_replaces_the_vouchers(clean_db: Engine, dev_settings: Settings) -> None:
     factory = make_session_factory(clean_db)
-    run(parse_args(["--count", "2"]), dev_settings, factory, io.StringIO())
+    assert run(parse_args(["--count", "2"]), dev_settings, factory, io.StringIO()) == 0
+    assert _count(clean_db) == 2
 
     out = io.StringIO()
     assert run(parse_args(["--reset", "--yes", "--count", "3"]), dev_settings, factory, out) == 0

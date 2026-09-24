@@ -2,10 +2,12 @@
 
 `DATABASE_URL` and `ENVIRONMENT` have no defaults: if either is missing the
 app refuses to start. `ENABLE_DEMO_ROUTES` defaults to true only in
-development, and production refuses to start with it switched on. Test-only variables (`TEST_DATABASE_URL`,
-`TEST_DATABASE_SCHEMA`) are deliberately *not* settings here — only the test
-suite reads them (see `tests/conftest.py`), so a production deployment never
-needs them.
+development, and production refuses to start with it switched on.
+
+One database, two schemas. `DEV_SCHEMA` (default `public`) holds the app's
+data in development and production; `TEST_SCHEMA` (default `kd_test`) holds
+the test suite's. `ENVIRONMENT` picks which one a process uses (see
+`Settings.active_schema`). The test suite refuses to run if the two are the same.
 """
 
 import re
@@ -61,9 +63,8 @@ class Settings(BaseSettings):
     # tracebacks (pytest prints fixture values when a test fails).
     database_url: Annotated[str, Field(repr=False, min_length=1)]
     environment: Environment
-    # The Postgres schema the app's tables live in. The test suite overrides it
-    # so tests can share a database with development without touching its data.
-    database_schema: str = "public"
+    dev_schema: str = "public"
+    test_schema: str = "kd_test"
     # Unset means "on in development, off everywhere else"; see demo_routes_enabled.
     enable_demo_routes: bool | None = None
     min_voucher_cents: int = Field(default=1000, gt=0)
@@ -74,9 +75,9 @@ class Settings(BaseSettings):
     def _normalize_database_url(cls, value: str) -> str:
         return normalize_database_url(value)
 
-    @field_validator("database_schema")
+    @field_validator("dev_schema", "test_schema")
     @classmethod
-    def _validate_database_schema(cls, value: str) -> str:
+    def _validate_schema(cls, value: str) -> str:
         return validate_schema_name(value)
 
     @model_validator(mode="after")
@@ -89,6 +90,11 @@ class Settings(BaseSettings):
         if self.min_voucher_cents > self.max_voucher_cents:
             raise ValueError("MIN_VOUCHER_CENTS must not exceed MAX_VOUCHER_CENTS")
         return self
+
+    @property
+    def active_schema(self) -> str:
+        """The schema this process works in: TEST_SCHEMA under test, else DEV_SCHEMA."""
+        return self.test_schema if self.environment == "test" else self.dev_schema
 
     @property
     def demo_routes_enabled(self) -> bool:

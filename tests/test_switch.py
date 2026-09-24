@@ -67,7 +67,10 @@ def test_serial_random_part_keeps_leading_zeros(monkeypatch: pytest.MonkeyPatch)
 
 
 def test_serials_are_distinct_at_volume() -> None:
-    serials = [generate_serial() for _ in range(10_000)]
+    # Same-day serials share their date, leaving 10^12 random values: 1 000
+    # draws collide with probability ~5e-7. (10 000 would be ~5e-5 per run, a
+    # real if rare flake; collisions are the unique constraint's job anyway.)
+    serials = [generate_serial() for _ in range(1_000)]
     assert len(set(serials)) == len(serials)
 
 

@@ -89,7 +89,7 @@ def _print_table(vended: Sequence[VendedVoucher], out: TextIO) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     settings = get_settings()
-    engine = make_engine(settings.database_url, settings.database_schema)
+    engine = make_engine(settings.database_url, settings.active_schema)
     try:
         return run(args, settings, make_session_factory(engine), sys.stdout)
     finally:

@@ -20,7 +20,7 @@ from app.switch import VoucherSwitch
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
-    engine = make_engine(settings.database_url, settings.database_schema)
+    engine = make_engine(settings.database_url, settings.active_schema)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
