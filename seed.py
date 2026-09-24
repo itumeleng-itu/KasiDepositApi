@@ -4,6 +4,9 @@
     python seed.py --reset            # shows what would be deleted, deletes nothing
     python seed.py --reset --yes --count 20
 
+--reset clears all demo data: vouchers, deposits, payouts, voucher tokens and
+the whole ledger, including the float.
+
 Refuses to run unless ENVIRONMENT=development. Vouchers are vended through
 VoucherSwitch, exactly as the demo till does; full PINs are printed so they
 can be redeemed in the demo.
@@ -20,9 +23,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db import make_engine, make_session_factory
-from app.models import Voucher
+from app.models import Base, Deposit, LedgerEntry, Payout, Voucher, VoucherToken
 from app.money import format_rand, rand_to_cents
 from app.switch import VendedVoucher, VoucherSwitch
+
+# Everything --reset clears, children before parents.
+RESET_TABLES: tuple[type[Base], ...] = (Payout, LedgerEntry, Deposit, VoucherToken, Voucher)
 
 # Realistic spaza denominations.
 DEMO_AMOUNTS_RAND = (50, 100, 200, 500, 1000)
@@ -58,18 +64,24 @@ def run(
 
     with session_factory() as session:
         if args.reset:
-            existing = session.scalar(select(func.count()).select_from(Voucher)) or 0
+            vouchers = session.scalar(select(func.count()).select_from(Voucher)) or 0
+            deposits = session.scalar(select(func.count()).select_from(Deposit)) or 0
+            summary = (
+                f"{vouchers} voucher(s), {deposits} deposit(s) and every ledger entry "
+                "(including the float)"
+            )
             if not args.yes:
                 print(
-                    f"--reset would delete all {existing} voucher(s) from the development "
-                    "database. Nothing was deleted. Re-run with --reset --yes to do it.",
+                    f"--reset would delete all {summary} from the development database. "
+                    "Nothing was deleted. Re-run with --reset --yes to do it.",
                     file=out,
                 )
                 return 1
-            # No CASCADE: once later phases reference vouchers, a reset that
-            # would take ledger rows with it must fail rather than proceed.
-            session.execute(text(f"TRUNCATE {Voucher.__tablename__}"))
-            print(f"Deleted {existing} voucher(s).", file=out)
+            # Named explicitly, no CASCADE: a table added later is never wiped
+            # by accident. It must be added to RESET_TABLES deliberately.
+            tables = ", ".join(model.__tablename__ for model in RESET_TABLES)
+            session.execute(text(f"TRUNCATE {tables}"))
+            print(f"Deleted {summary}.", file=out)
 
         vended = [switch.vend(session, secrets.choice(amounts)) for _ in range(args.count)]
         session.commit()

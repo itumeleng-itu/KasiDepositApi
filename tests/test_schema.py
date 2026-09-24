@@ -163,18 +163,26 @@ def test_models_match_migrations(clean_db: Engine) -> None:
 def test_migration_downgrades_cleanly_and_upgrades_again(
     clean_db: Engine, alembic_config: Config
 ) -> None:
+    enums = ("voucher_status", "deposit_status", "ledger_account", "payout_status")
+    functions = ("set_updated_at", "ledger_entries_append_only", "ledger_entry_group_balanced")
     type_count = text(
         "SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace"
-        " WHERE t.typname = 'voucher_status' AND n.nspname = current_schema()"
-    )
+        " WHERE t.typname = ANY(:names) AND n.nspname = current_schema()"
+    ).bindparams(names=list(enums))
+    function_count = text(
+        "SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace"
+        " WHERE p.proname = ANY(:names) AND n.nspname = current_schema()"
+    ).bindparams(names=list(functions))
     try:
         command.downgrade(alembic_config, "base")
         with clean_db.connect() as conn:
             assert conn.execute(text("SELECT to_regclass('vouchers')")).scalar_one() is None
             assert conn.execute(type_count).scalar_one() == 0
+            assert conn.execute(function_count).scalar_one() == 0
     finally:
         # Always leave the schema at head for the rest of the session.
         command.upgrade(alembic_config, "head")
     with clean_db.connect() as conn:
         assert conn.execute(text("SELECT to_regclass('vouchers')")).scalar_one() is not None
-        assert conn.execute(type_count).scalar_one() == 1
+        assert conn.execute(type_count).scalar_one() == len(enums)
+        assert conn.execute(function_count).scalar_one() == len(functions)

@@ -6,9 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import make_session_factory
-from app.models import Voucher, VoucherStatus
+from app.models import Base, Voucher, VoucherStatus
 from app.money import rand_to_cents
-from seed import DEMO_AMOUNTS_RAND, parse_args, run
+from seed import DEMO_AMOUNTS_RAND, RESET_TABLES, parse_args, run
 
 
 @pytest.fixture
@@ -82,3 +82,8 @@ def test_reset_with_yes_replaces_the_vouchers(clean_db: Engine, dev_settings: Se
 def test_count_is_bounded(count: str) -> None:
     with pytest.raises(SystemExit):
         parse_args(["--count", count])
+
+
+def test_reset_covers_every_table() -> None:
+    # There is no CASCADE: a new table must be added to RESET_TABLES deliberately.
+    assert {m.__tablename__ for m in RESET_TABLES} == set(Base.metadata.tables)
