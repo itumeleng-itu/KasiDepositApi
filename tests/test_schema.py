@@ -118,6 +118,42 @@ def test_active_status_partial_index_exists(db_session: Session) -> None:
     assert "WHERE (status = 'active'::voucher_status)" in indexdef
 
 
+def test_every_table_has_row_level_security(db_session: Session) -> None:
+    # Hosted providers (Supabase) expose tables to a public API key unless RLS
+    # is on. Every application table, now and in later phases, must enable it.
+    names = [t.name for t in Base.metadata.sorted_tables] + ["alembic_version"]
+    rows = db_session.execute(
+        text(
+            "SELECT c.relname, c.relrowsecurity FROM pg_class c"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " WHERE n.nspname = current_schema() AND c.relname = ANY(:names)"
+        ),
+        {"names": names},
+    ).all()
+    assert sorted(r.relname for r in rows) == sorted(names)
+    assert [r.relname for r in rows if not r.relrowsecurity] == []
+
+
+@pytest.mark.parametrize("role", ["anon", "authenticated"])
+def test_hosted_api_roles_have_no_table_privileges(db_session: Session, role: str) -> None:
+    if not db_session.execute(
+        text("SELECT exists(SELECT 1 FROM pg_roles WHERE rolname = :r)"), {"r": role}
+    ).scalar_one():
+        pytest.skip(f"no {role!r} role on this Postgres (not a Supabase-style host)")
+    for table in [t.name for t in Base.metadata.sorted_tables] + ["alembic_version"]:
+        granted = db_session.execute(
+            text(
+                "SELECT array_remove(ARRAY["
+                " CASE WHEN has_table_privilege(:r, :t, 'SELECT') THEN 'SELECT' END,"
+                " CASE WHEN has_table_privilege(:r, :t, 'INSERT') THEN 'INSERT' END,"
+                " CASE WHEN has_table_privilege(:r, :t, 'UPDATE') THEN 'UPDATE' END,"
+                " CASE WHEN has_table_privilege(:r, :t, 'DELETE') THEN 'DELETE' END], NULL)"
+            ),
+            {"r": role, "t": table},
+        ).scalar_one()
+        assert granted == [], f"{role} can {granted} on {table}"
+
+
 def test_models_match_migrations(clean_db: Engine) -> None:
     with clean_db.connect() as conn:
         diff = compare_metadata(MigrationContext.configure(conn), Base.metadata)
