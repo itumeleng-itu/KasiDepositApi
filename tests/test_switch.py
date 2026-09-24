@@ -203,12 +203,3 @@ def test_recent_masks_pins_and_orders_newest_first(
     assert summaries[0].status is VoucherStatus.REDEEMED
     assert summaries[0].redeemed_at is not None
     assert summaries[1].pin_masked == "************1111"
-
-
-def test_lookup_and_charge_are_not_implemented_yet(
-    db_session: Session, voucher_switch: VoucherSwitch
-) -> None:
-    with pytest.raises(NotImplementedError):
-        voucher_switch.lookup(db_session, "1234567890123456")
-    with pytest.raises(NotImplementedError):
-        voucher_switch.charge(db_session, "1234567890123456")

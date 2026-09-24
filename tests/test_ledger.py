@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.ledger import Entry, UnbalancedEntries, balance_of, fund_float, post
 from app.models import LedgerAccount, LedgerEntry
+from tests.conftest import assert_ledger_balanced
 
 S = LedgerAccount.SETTLEMENT
 VR = LedgerAccount.VOUCHER_RECEIVABLE
@@ -17,18 +18,6 @@ FEE = LedgerAccount.FEE_INCOME
 CAP = LedgerAccount.CAPITAL
 
 PIN = "1234567890123456"
-
-
-def assert_ledger_balanced(session: Session) -> None:
-    """The whole table sums to zero, and so does every entry_group in it."""
-    total = session.scalar(select(func.coalesce(func.sum(LedgerEntry.amount_cents), 0)))
-    assert total == 0
-    unbalanced = session.execute(
-        select(LedgerEntry.entry_group)
-        .group_by(LedgerEntry.entry_group)
-        .having(func.sum(LedgerEntry.amount_cents) != 0)
-    ).all()
-    assert unbalanced == []
 
 
 def _row_count(session: Session) -> int:

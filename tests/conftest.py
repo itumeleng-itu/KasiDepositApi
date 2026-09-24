@@ -21,13 +21,13 @@ from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from sqlalchemy import Connection, Engine, text
+from sqlalchemy import Connection, Engine, func, select, text
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import make_engine, make_session_factory
 from app.main import create_app
-from app.models import Base
+from app.models import Base, LedgerEntry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -138,3 +138,15 @@ def db_session(clean_db: Engine) -> Iterator[Session]:
 def client(clean_db: Engine, test_settings: Settings) -> Iterator[TestClient]:
     with TestClient(create_app(test_settings)) as c:
         yield c
+
+
+def assert_ledger_balanced(session: Session) -> None:
+    """The whole ledger sums to zero, and so does every entry_group in it."""
+    total = session.scalar(select(func.coalesce(func.sum(LedgerEntry.amount_cents), 0)))
+    assert total == 0
+    unbalanced = session.execute(
+        select(LedgerEntry.entry_group)
+        .group_by(LedgerEntry.entry_group)
+        .having(func.sum(LedgerEntry.amount_cents) != 0)
+    ).all()
+    assert unbalanced == []

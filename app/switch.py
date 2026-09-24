@@ -19,7 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from psycopg.errors import UniqueViolation
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -83,12 +83,28 @@ class VoucherSummary:
 
 @dataclass(frozen=True)
 class VoucherInfo:
-    """Result of `VoucherSwitch.lookup`. Fields are defined in phase 2."""
+    """What `VoucherSwitch.lookup` reports. Reading it charges nothing."""
+
+    pin: str
+    amount_cents: Cents
+    status: VoucherStatus
 
 
 @dataclass(frozen=True)
 class ChargeResult:
-    """Result of `VoucherSwitch.charge`. Fields are defined in phase 2."""
+    """A voucher charged for its full amount by `VoucherSwitch.charge`."""
+
+    pin: str
+    amount_cents: Cents
+    redeemed_at: datetime
+
+
+class VoucherNotFound(LookupError):
+    """No voucher has this PIN."""
+
+
+class AlreadyRedeemed(RuntimeError):
+    """The voucher has already been charged."""
 
 
 class AmountOutOfRange(ValueError):
@@ -178,12 +194,51 @@ class VoucherSwitch:
         ]
 
     def lookup(self, session: Session, pin: str) -> VoucherInfo:
-        """Phase 2: report a voucher's amount and whether it can be charged."""
-        raise NotImplementedError("VoucherSwitch.lookup arrives in phase 2")
+        """Report a voucher's amount and status. Takes no lock and charges nothing."""
+        voucher = session.scalar(select(Voucher).where(Voucher.pin == pin))
+        if voucher is None:
+            raise VoucherNotFound(pin)
+        return VoucherInfo(pin=voucher.pin, amount_cents=voucher.amount_cents, status=voucher.status)
 
     def charge(self, session: Session, pin: str) -> ChargeResult:
-        """Phase 2: redeem a voucher for its full amount, under a row lock."""
-        raise NotImplementedError("VoucherSwitch.charge arrives in phase 2")
+        """Redeem a voucher for its full amount. Single-use: there is no amount.
+
+        The row lock is the most important line in the deposit flow. Without
+        it, two concurrent requests for one PIN both read `active` and both
+        pay out: money created from nothing. With it, the second request waits
+        until the first commits, then reads `redeemed` and fails.
+
+        Does not commit. The caller posts the ledger entries in the same
+        transaction, so the charge and its entries commit or roll back together.
+
+        Call this BEFORE inserting anything that references the voucher (a
+        deposit, a ledger entry's deposit). An insert with a foreign key to the
+        voucher takes a KEY SHARE lock on its row, which conflicts with FOR
+        UPDATE: if two concurrent requests each insert first and then charge,
+        each holds KEY SHARE while waiting for the other's FOR UPDATE, and
+        Postgres aborts one as a deadlock instead of one cleanly losing.
+        """
+        voucher = session.scalar(
+            select(Voucher)
+            .where(Voucher.pin == pin)
+            .with_for_update()
+            # Re-read under the lock even if this session already holds the row.
+            .execution_options(populate_existing=True)
+        )
+        if voucher is None:
+            raise VoucherNotFound(pin)
+        if voucher.status is not VoucherStatus.ACTIVE:
+            raise AlreadyRedeemed(pin)
+        redeemed_at = session.execute(
+            update(Voucher)
+            .where(Voucher.pin == pin)
+            .values(status=VoucherStatus.REDEEMED, redeemed_at=func.now())
+            .returning(Voucher.redeemed_at)
+        ).scalar_one()
+        amount_cents = voucher.amount_cents
+        # The UPDATE bypassed the ORM; drop the stale copy rather than re-query.
+        session.expire(voucher)
+        return ChargeResult(pin=pin, amount_cents=amount_cents, redeemed_at=redeemed_at)
 
 
 def _is_collision(exc: IntegrityError) -> bool:
