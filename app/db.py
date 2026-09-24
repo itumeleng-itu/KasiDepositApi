@@ -54,7 +54,11 @@ def session_setup_sql(schema: str) -> str:
 
 def make_engine(database_url: str, schema: str) -> Engine:
     setup_sql = session_setup_sql(schema)
-    engine = create_engine(database_url, pool_pre_ping=True, connect_args=CONNECT_ARGS)
+    # hide_parameters: SQL errors would otherwise print bound values into the
+    # log, PINs included (a failed voucher query carries the PIN).
+    engine = create_engine(
+        database_url, pool_pre_ping=True, connect_args=CONNECT_ARGS, hide_parameters=True
+    )
 
     @event.listens_for(engine, "connect")
     def _set_up_session(dbapi_connection: DBAPIConnection, _record: ConnectionPoolEntry) -> None:

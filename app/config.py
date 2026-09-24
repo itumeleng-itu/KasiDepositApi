@@ -2,7 +2,9 @@
 
 `DATABASE_URL` and `ENVIRONMENT` have no defaults: if either is missing the
 app refuses to start. `ENABLE_DEMO_ROUTES` defaults to true only in
-development, and production refuses to start with it switched on.
+development. In production the demo routes may be switched on only together
+with a `DEMO_API_KEY`: every /demo request must then present it, and without
+it /demo answers 404 as if it did not exist (see app/routes/demo.py).
 
 One database, two schemas. `DEV_SCHEMA` (default `public`) holds the app's
 data in development and production; `TEST_SCHEMA` (default `kd_test`) holds
@@ -73,6 +75,9 @@ class Settings(BaseSettings):
     fee_cents: int = Field(default=500, ge=0)
     # How long a voucher lookup's token may be used to create a deposit.
     voucher_token_ttl_seconds: int = Field(default=600, gt=0)
+    # Secret that /demo requests must present in the X-Demo-Key header. Required
+    # when the demo routes are on in production; optional elsewhere.
+    demo_api_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
 
     @field_validator("database_url")
     @classmethod
@@ -86,10 +91,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_consistency(self) -> Self:
-        if self.environment == "production" and self.enable_demo_routes:
+        if self.environment == "production" and self.enable_demo_routes and not self.demo_api_key:
             raise ValueError(
-                "ENABLE_DEMO_ROUTES must not be true in production: the demo "
-                "routes vend vouchers and stand in for an issuer's terminal"
+                "ENABLE_DEMO_ROUTES in production needs DEMO_API_KEY: without it the "
+                "demo routes would let anyone vend vouchers and spend the float"
             )
         if self.min_voucher_cents > self.max_voucher_cents:
             raise ValueError("MIN_VOUCHER_CENTS must not exceed MAX_VOUCHER_CENTS")

@@ -158,11 +158,30 @@ def test_demo_routes_can_be_switched_off_in_development(monkeypatch: pytest.Monk
     assert Settings(_env_file=None).demo_routes_enabled is False
 
 
-def test_production_refuses_demo_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_production_refuses_demo_routes_without_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", DEV)
     monkeypatch.setenv("ENVIRONMENT", "production")
     monkeypatch.setenv("ENABLE_DEMO_ROUTES", "true")
-    with pytest.raises(ValidationError, match="must not be true in production"):
+    monkeypatch.delenv("DEMO_API_KEY", raising=False)
+    with pytest.raises(ValidationError, match="needs DEMO_API_KEY"):
+        Settings(_env_file=None)
+
+
+def test_production_allows_demo_routes_behind_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ENABLE_DEMO_ROUTES", "true")
+    monkeypatch.setenv("DEMO_API_KEY", "k" * 32)
+    settings = Settings(_env_file=None)
+    assert settings.demo_routes_enabled
+    assert "k" * 32 not in repr(settings)  # the key never reaches logs
+
+
+def test_a_short_demo_key_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", DEV)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    monkeypatch.setenv("DEMO_API_KEY", "too-short")
+    with pytest.raises(ValidationError, match="demo_api_key"):
         Settings(_env_file=None)
 
 

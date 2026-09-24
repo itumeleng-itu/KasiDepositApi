@@ -42,7 +42,7 @@ The float is topped up from `capital` (`python seed.py --fund 10000`).
 
 | Surface | What it is | Status |
 |---|---|---|
-| `/demo/*` | Stands in for a voucher issuer's vending terminal. It exists only so the product can be demonstrated. Absent in production. **The mobile app must never call it.** | Built |
+| `/demo/*` | Stands in for a voucher issuer's vending terminal, plus the float. It exists only so the product can be demonstrated. Hosted, it sits behind a secret key. **The mobile app must never call it.** | Built |
 | `/v1/*` | The mobile app's API: look up a voucher, resolve a ShapID, create a deposit, poll its status. | Built |
 
 `GET /health` sits outside both and reports only whether the database is reachable.
@@ -117,13 +117,25 @@ The mock payout moves to `submitted` after about 1.5s and settles after 3s.
 Only the three amounts above fail; every other payout completes. The ShapID
 scenarios match the app's own fake (see its `TESTING.md`).
 
-### `/demo` safeguards
+### `/demo`: the till and the float
 
-- On by default only when `ENVIRONMENT=development`. With
-  `ENABLE_DEMO_ROUTES=false` the router isn't mounted at all, so `/demo`
-  returns 404.
-- The app refuses to start with `ENVIRONMENT=production` and `ENABLE_DEMO_ROUTES=true`.
-- Every `/demo` response carries `X-Demo-Surface: true`.
+| Call | Does |
+|---|---|
+| `POST /demo/vouchers` `{"amount_cents": 50000}` | vends a voucher, as the spaza's till would |
+| `GET /demo/vouchers` | the 50 most recent vouchers, PINs masked |
+| `GET /demo/float` | the float: settlement balance, and what is still free to pay out |
+| `POST /demo/float` `{"amount_cents": 1000000}` | tops up the float from capital (up to R1 000 000 at a time) |
+
+Safeguards:
+
+- **Off unless switched on.** On by default only when `ENVIRONMENT=development`.
+  With `ENABLE_DEMO_ROUTES=false` the router isn't mounted at all.
+- **Behind a key when hosted.** With `DEMO_API_KEY` set (at least 32
+  characters), every `/demo` request must send it as `X-Demo-Key`. Without it,
+  `/demo` answers a plain 404, even for a malformed body, exactly like a path
+  that doesn't exist. It is also left out of the OpenAPI schema. Production
+  refuses to start with demo routes on and no key.
+- **Marked.** Every authorised `/demo` response carries `X-Demo-Surface: true`.
 
 ### One database, two schemas
 
@@ -201,6 +213,49 @@ python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 Then try `GET /health`, vend at `POST /demo/vouchers` with
 `{"amount_cents": 50000}`, and see the docs at `/docs`.
 
+## Deploying on Render
+
+`render.yaml` is a Render Blueprint. In the Render dashboard choose
+**New > Blueprint** and pick this repo, then set `DATABASE_URL`. Render
+generates `DEMO_API_KEY` itself.
+
+| Setting | Value |
+|---|---|
+| Region | Frankfurt, next to the Supabase database (`eu-central-1`) |
+| Plan | Starter. Pre-deploy commands need a paid instance, and a free one sleeps when idle, making the first request slower than the app's 15-second timeout. |
+| Branch | `main` |
+| Build | `pip install -r requirements.txt`, which gets `psycopg[binary]` on Linux |
+| Before each deploy | `python -m alembic upgrade head` |
+| Start | `python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips "*"` |
+| Health check | `/health` |
+
+**Environment variables:**
+
+| Variable | Value | Notes |
+|---|---|---|
+| `ENVIRONMENT` | `production` | set by `render.yaml` |
+| `DATABASE_URL` | the Supabase **Session pooler** string | enter it in the dashboard; percent-encode special characters in the password (`@` becomes `%40`) |
+| `ENABLE_DEMO_ROUTES` | `true` | set by `render.yaml` |
+| `DEMO_API_KEY` | generated | read it from the dashboard to call `/demo` |
+
+**What production serves:**
+
+- `/health` and `/v1`, open to the app.
+- `/demo`, only with the key.
+- No `/docs`, `/redoc` or `/openapi.json`.
+- Startup refuses a database schema that is behind the code, and says to migrate.
+
+**Operating it from anywhere:**
+
+```sh
+curl https://<service>.onrender.com/demo/float -H "X-Demo-Key: $KEY"
+curl -X POST https://<service>.onrender.com/demo/float -H "X-Demo-Key: $KEY"      -H "content-type: application/json" -d '{"amount_cents": 1000000}'
+curl -X POST https://<service>.onrender.com/demo/vouchers -H "X-Demo-Key: $KEY"      -H "content-type: application/json" -d '{"amount_cents": 50000}'
+```
+
+In the mobile app's `.env`, set
+`EXPO_PUBLIC_API_BASE_URL=https://<service>.onrender.com/v1`.
+
 ## Tests
 
 ```sh
@@ -223,12 +278,17 @@ against a Frankfurt database, because most tests make many network round trips.
 
 ## Known limits
 
+- **No user authentication or rate limiting on `/v1`.** Anyone can look up a
+  PIN (it takes the full 16 digits, and there are 10^16 of them), and every
+  lookup stores a short-lived token.
 - **Payouts advance when the deposit is read.** There is no background worker,
   so a deposit nobody polls stays `submitted` until someone reads it.
 - **The float lock serialises every deposit.** That is fine at demo volume.
 - **The account-number destination** (`kind: "account"`) stores a bank account
   number. That is personal information under POPIA. Nothing constructs it
   today, and it needs a retention and encryption decision before it goes live.
+- **Logs:** ShapIDs are masked in the access log (`/v1/shapid/***`), and SQL
+  errors never include their parameters, so PINs stay out of logs.
 - **A real payout provider** must be called outside the database transaction.
   The mock answers instantly; a slow real call would hit the 10s
   idle-in-transaction limit.
