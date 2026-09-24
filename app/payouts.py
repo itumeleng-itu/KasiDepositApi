@@ -70,6 +70,12 @@ class UnknownPayout(LookupError):
     """The provider has no payout with this reference."""
 
 
+class PayoutUnavailable(Exception):
+    """The provider could not be reached. Not a payout failure: nothing is
+    known to have happened, so the caller leaves the deposit as it is and
+    tries again later (see app/deposits.py)."""
+
+
 class PayoutProvider(Protocol):
     def create(
         self, amount_cents: Cents, destination: Mapping[str, Any], idempotency_key: str

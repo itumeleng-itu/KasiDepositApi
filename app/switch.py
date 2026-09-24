@@ -240,6 +240,31 @@ class VoucherSwitch:
         session.expire(voucher)
         return ChargeResult(pin=pin, amount_cents=amount_cents, redeemed_at=redeemed_at)
 
+    def reverse_charge(self, session: Session, pin: str) -> None:
+        """Undo a charge: return a redeemed voucher to active, so it can be used again.
+
+        Used when a deposit's payout fails, so "Try again" with the same PIN
+        works instead of stranding her money. DEMO SIMPLIFICATION, not a
+        production design: a real issuer would need to expose a reversal API
+        for this, and may not. Same row lock and no commit, as `charge`.
+        """
+        voucher = session.scalar(
+            select(Voucher)
+            .where(Voucher.pin == pin)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if voucher is None:
+            raise VoucherNotFound(pin)
+        if voucher.status is not VoucherStatus.REDEEMED:
+            raise ValueError(f"voucher is {voucher.status}, not redeemed: nothing to reverse")
+        session.execute(
+            update(Voucher)
+            .where(Voucher.pin == pin)
+            .values(status=VoucherStatus.ACTIVE, redeemed_at=None)
+        )
+        session.expire(voucher)
+
 
 def _is_collision(exc: IntegrityError) -> bool:
     return (

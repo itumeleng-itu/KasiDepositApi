@@ -165,6 +165,18 @@ def available_float(session: Session) -> Cents:
 FLOAT_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext('kasideposit-float:' || current_schema()))")
 
 
+def lock_float(session: Session) -> None:
+    """Take the float lock for the rest of this transaction (see below)."""
+    session.execute(FLOAT_LOCK_SQL)
+
+
+def check_float(session: Session, payout_cents: Cents) -> None:
+    """Refuse a payout the float cannot cover. Call with the float lock held."""
+    available = available_float(session)
+    if payout_cents > available:
+        raise InsufficientFloat(payout_cents, available)
+
+
 def lock_and_check_float(session: Session, payout_cents: Cents) -> None:
     """Serialise float checks, then refuse a payout the float cannot cover.
 
@@ -178,7 +190,5 @@ def lock_and_check_float(session: Session, payout_cents: Cents) -> None:
     row lock (`VoucherSwitch.charge`) second, so the two can never deadlock.
     The float lock serialises all deposits, which is fine at demo volume.
     """
-    session.execute(FLOAT_LOCK_SQL)
-    available = available_float(session)
-    if payout_cents > available:
-        raise InsufficientFloat(payout_cents, available)
+    lock_float(session)
+    check_float(session, payout_cents)
