@@ -60,7 +60,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import BigInteger, cast, func, select
+from sqlalchemy import BigInteger, cast, func, select, text
 from sqlalchemy.orm import Session
 
 from app.models import LedgerAccount, LedgerEntry
@@ -77,6 +77,17 @@ class Entry:
 
 class UnbalancedEntries(ValueError):
     """The entries do not form a valid double-entry transaction."""
+
+
+class InsufficientFloat(Exception):
+    """The float cannot cover this payout. Raised before anything is charged."""
+
+    reason = "insufficient_float"
+
+    def __init__(self, payout_cents: Cents, available_cents: Cents) -> None:
+        super().__init__(f"payout of {payout_cents} cents exceeds available float of {available_cents}")
+        self.payout_cents = payout_cents
+        self.available_cents = available_cents
 
 
 def post(session: Session, deposit_id: uuid.UUID | None, entries: Sequence[Entry]) -> uuid.UUID:
@@ -137,3 +148,37 @@ def fund_float(session: Session, amount_cents: Cents) -> uuid.UUID:
             Entry(LedgerAccount.CAPITAL, -amount_cents),
         ],
     )
+
+
+def available_float(session: Session) -> Cents:
+    """What the float can still pay out: the settlement balance, less what we
+    already owe users for charged vouchers whose payouts have not settled.
+
+    `user_payable` carries a negative balance while we owe money (credits are
+    negative), so adding it subtracts what is owed.
+    """
+    return balance_of(session, LedgerAccount.SETTLEMENT) + balance_of(
+        session, LedgerAccount.USER_PAYABLE
+    )
+
+
+FLOAT_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext('kasideposit-float:' || current_schema()))")
+
+
+def lock_and_check_float(session: Session, payout_cents: Cents) -> None:
+    """Serialise float checks, then refuse a payout the float cannot cover.
+
+    Call inside the charging transaction, BEFORE charging the voucher. The
+    advisory lock is held until that transaction ends, so a concurrent deposit
+    waits here until this one's charge entries (its `user_payable` credit) are
+    committed and counted. Without the lock, two deposits could each see the
+    whole float and together overdraw it.
+
+    Lock order: every request takes this float lock first and the voucher's
+    row lock (`VoucherSwitch.charge`) second, so the two can never deadlock.
+    The float lock serialises all deposits, which is fine at demo volume.
+    """
+    session.execute(FLOAT_LOCK_SQL)
+    available = available_float(session)
+    if payout_cents > available:
+        raise InsufficientFloat(payout_cents, available)
