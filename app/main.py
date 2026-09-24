@@ -19,7 +19,7 @@ from app.config import Settings, get_settings
 from app.db import make_engine, make_session_factory
 from app.deposits import DepositService
 from app.payouts import MockPayoutProvider, PayoutProvider
-from app.routes import demo, health, v1
+from app.routes import demo, health, till, v1
 from app.schema_check import check_schema_is_current
 from app.switch import VoucherSwitch
 
@@ -66,4 +66,5 @@ def create_app(
     if settings.demo_routes_enabled:
         # Absent, not forbidden: with the flag off, /demo simply does not exist.
         demo.mount(app, settings)
+        till.mount(app)
     return app

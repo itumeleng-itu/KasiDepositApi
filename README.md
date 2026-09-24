@@ -213,6 +213,26 @@ python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000
 Then try `GET /health`, vend at `POST /demo/vouchers` with
 `{"amount_cents": 50000}`, and see the docs at `/docs`.
 
+## Using the till
+
+The till is a page for a cashier, at **`/till`** (for example
+`https://kasidepositapi.onrender.com/till`). It works on a phone, tablet or
+computer, and needs no technical knowledge:
+
+1. **First use on a device:** enter the **till code**, which is the server's
+   `DEMO_API_KEY`. The browser remembers it, so the cashier doesn't see it again.
+2. **Selling:** take the cash, tap **R50, R100, R200, R500 or R1 000** (or type
+   another amount in rand), then confirm.
+3. **The slip:** shows the **PIN** in large grouped digits, with the amount,
+   serial and time. **Print** sends just the slip to a printer.
+4. **Manager:** shows the float available to pay out, and tops it up.
+
+The page holds no secret. Everything it does is a `/demo` request carrying the
+till code, so without the code it can't create vouchers or touch the float.
+It is served only when the demo routes are on, and never appears in the API
+schema. The customer deposits the PIN in the mobile app, which never uses the
+till code.
+
 ## Deploying on Render
 
 `render.yaml` is a Render Blueprint. In the Render dashboard choose
