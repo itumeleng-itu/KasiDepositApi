@@ -50,11 +50,15 @@ def validate_schema_name(name: str) -> str:
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=ENV_FILE, extra="ignore")
+    # hide_input_in_errors: validation errors would otherwise echo the raw
+    # environment, connection string and password included.
+    model_config = SettingsConfigDict(
+        env_file=ENV_FILE, extra="ignore", hide_input_in_errors=True
+    )
 
     # repr=False: the URL carries the password and must never reach logs or
     # tracebacks (pytest prints fixture values when a test fails).
-    database_url: Annotated[str, Field(repr=False)]
+    database_url: Annotated[str, Field(repr=False, min_length=1)]
     environment: Environment
     # The Postgres schema the app's tables live in. The test suite overrides it
     # so tests can share a database with development without touching its data.
