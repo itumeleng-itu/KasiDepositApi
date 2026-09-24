@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>KasiDeposit Till</title>
+<!--
+  The demo till: stands in for the voucher issuer's terminal at a spaza shop.
+  Everything it does goes through /demo, which needs the till code (the
+  server's DEMO_API_KEY) in the X-Demo-Key header. The page holds no secret:
+  the cashier types the code once and it stays in this browser.
+-->
+<style>
+  :root {
+    --bg: #f6f7f5; --panel: #ffffff; --ink: #1d2320; --muted: #5d6762;
+    --line: #dde2de; --brand: #0b7a52; --brand-ink: #ffffff;
+    --danger: #b3261e; --danger-bg: #fdecea; --ok-bg: #e7f5ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121614; --panel: #1b201d; --ink: #e8ece9; --muted: #a3ada7;
+      --line: #2f3632; --brand: #2fb37f; --brand-ink: #06140e;
+      --danger: #ff8a80; --danger-bg: #3a1c1a; --ok-bg: #16291f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 520px; margin: 0 auto; padding: 16px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 18px; margin: 0 0 12px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .muted { color: var(--muted); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+  button {
+    font: inherit; border: 0; border-radius: 10px; cursor: pointer;
+    min-height: 56px; padding: 12px 16px;
+  }
+  button:focus-visible, input:focus-visible { outline: 3px solid var(--brand); outline-offset: 2px; }
+  .amount { background: var(--brand); color: var(--brand-ink); font-size: 22px; font-weight: 700; }
+  .primary { background: var(--brand); color: var(--brand-ink); font-weight: 700; width: 100%; }
+  .secondary { background: transparent; color: var(--ink); border: 1px solid var(--line); width: 100%; }
+  .link { background: none; color: var(--brand); min-height: 44px; padding: 8px; text-decoration: underline; }
+  .row { display: flex; gap: 12px; margin-top: 12px; }
+  .row > * { flex: 1; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  input {
+    font: inherit; width: 100%; min-height: 52px; padding: 10px 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);
+  }
+  .error { background: var(--danger-bg); color: var(--danger); border-radius: 10px; padding: 12px; margin-top: 12px; }
+  .big { font-size: 28px; font-weight: 700; margin: 4px 0 12px; }
+  .slip { background: var(--ok-bg); text-align: center; }
+  .pin { font: 700 30px/1.2 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 1px; margin: 12px 0; word-spacing: 6px; }
+  .slip dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; margin: 12px auto 0; max-width: 320px; }
+  .slip dt { color: var(--muted); }
+  .slip dd { margin: 0; font-weight: 600; }
+  [hidden] { display: none !important; }
+  @media print {
+    body { background: #fff; color: #000; }
+    body * { visibility: hidden; }
+    #slip, #slip * { visibility: visible; }
+    #slip { position: absolute; inset: 0 auto auto 0; width: 100%; background: #fff; border: 0; }
+    .noprint { display: none !important; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header class="noprint">
+    <h1>KasiDeposit Till</h1>
+    <button type="button" class="link" id="to-manager" hidden>Manager</button>
+  </header>
+
+  <!-- First use on this device: the till code (the server's DEMO_API_KEY). -->
+  <section id="setup" class="panel" hidden>
+    <h2>Set up this till</h2>
+    <p class="muted">Enter the till code from the manager. You only need to do this once on this device.</p>
+    <form id="setup-form">
+      <label for="code">Till code</label>
+      <input id="code" type="password" autocomplete="off" required>
+      <div class="row"><button type="submit" class="primary">Save till code</button></div>
+    </form>
+    <div id="setup-error" class="error" role="alert" hidden></div>
+  </section>
+
+  <!-- Choose an amount. -->
+  <section id="sell" class="panel" hidden>
+    <h2>Sell a voucher</h2>
+    <p class="muted">Take the cash first, then choose the amount.</p>
+    <div class="grid" id="amounts"></div>
+    <form id="other-form" class="row">
+      <div>
+        <label for="other">Other amount (R)</label>
+        <input id="other" inputmode="decimal" placeholder="e.g. 150">
+      </div>
+    </form>
+    <div class="row"><button type="submit" form="other-form" class="secondary">Sell other amount</button></div>
+    <div id="sell-error" class="error" role="alert" hidden></div>
+  </section>
+
+  <!-- Confirm, so a mis-tap never creates a voucher. -->
+  <section id="confirm" class="panel" hidden>
+    <h2>Sell this voucher?</h2>
+    <p class="big" id="confirm-amount"></p>
+    <div class="row">
+      <button type="button" class="secondary" id="confirm-no">Cancel</button>
+      <button type="button" class="primary" id="confirm-yes">Yes, sell</button>
+    </div>
+  </section>
+
+  <!-- Waiting (the free server can take up to a minute to wake). -->
+  <section id="working" class="panel" hidden aria-live="polite">
+    <h2 id="working-text">Creating voucher…</h2>
+    <p class="muted" id="working-hint" hidden>The server is waking up. This can take up to a minute.</p>
+  </section>
+
+  <!-- The slip. -->
+  <section id="slip" class="panel slip" hidden aria-live="polite">
+    <h2>KasiDeposit voucher</h2>
+    <p class="big" id="slip-amount"></p>
+    <div class="muted">Voucher PIN</div>
+    <div class="pin" id="slip-pin"></div>
+    <dl>
+      <dt>Serial</dt><dd id="slip-serial"></dd>
+      <dt>Issued</dt><dd id="slip-time"></dd>
+    </dl>
+    <p class="muted">Deposit it in the KasiDeposit app. It can be used once.</p>
+    <div class="row noprint">
+      <button type="button" class="secondary" id="print">Print</button>
+      <button type="button" class="primary" id="new-sale">New sale</button>
+    </div>
+  </section>
+
+  <!-- Manager: the float. -->
+  <section id="manager" class="panel" hidden>
+    <h2>Manager</h2>
+    <p class="muted">The float pays customers out immediately; the voucher issuer repays it later.</p>
+    <p>Available to pay out: <strong id="float-available">…</strong></p>
+    <p class="muted">In the settlement account: <span id="float-settlement">…</span></p>
+    <form id="topup-form">
+      <label for="topup">Top up the float (R)</label>
+      <input id="topup" inputmode="decimal" placeholder="e.g. 10000">
+      <div class="row"><button type="submit" class="primary">Top up</button></div>
+    </form>
+    <div id="manager-error" class="error" role="alert" hidden></div>
+    <div class="row">
+      <button type="button" class="secondary" id="to-sell">Back to till</button>
+    </div>
+    <div class="row">
+      <button type="button" class="link" id="forget-code">Change till code on this device</button>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const AMOUNTS_RAND = [50, 100, 200, 500, 1000];
+const MIN_CENTS = 1000;          // R10
+const MAX_CENTS = 500000;        // R5 000
+const CODE_KEY = "kasideposit.tillCode";
+const REQUEST_TIMEOUT_MS = 75000; // the free server can take ~60 s to wake
+
+const $ = (id) => document.getElementById(id);
+const screens = ["setup", "sell", "confirm", "working", "slip", "manager"];
+
+function show(name) {
+  for (const s of screens) $(s).hidden = s !== name;
+  $("to-manager").hidden = !(name === "sell" || name === "slip");
+}
+function setError(id, message) {
+  $(id).textContent = message || "";
+  $(id).hidden = !message;
+}
+
+function getCode() { try { return localStorage.getItem(CODE_KEY); } catch { return null; } }
+function setCode(code) { try { localStorage.setItem(CODE_KEY, code); } catch { /* private mode */ } }
+function forgetCode() { try { localStorage.removeItem(CODE_KEY); } catch { /* ignore */ } }
+
+/* Money: integer cents only, never floats. */
+function randToCents(text) {
+  const t = String(text).trim().replace(/\s/g, "").replace(/^R/i, "").replace(",", ".");
+  if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
+  const [rand, cents = ""] = t.split(".");
+  return parseInt(rand, 10) * 100 + parseInt((cents + "00").slice(0, 2), 10);
+}
+function formatRand(cents) {
+  const sign = cents < 0 ? "-" : "";
+  const abs = Math.abs(cents);
+  const rand = Math.floor(abs / 100).toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+  return `${sign}R${rand}.${String(abs % 100).padStart(2, "0")}`;
+}
+function groupPin(pin) { return pin.replace(/(\d{4})(?=\d)/g, "$1 "); }
+
+class TillError extends Error {}
+class WrongCode extends TillError {}
+
+/* One request to /demo with the till code. Slow responses show a hint. */
+async function demoRequest(method, path, body) {
+  const code = getCode();
+  if (!code) throw new WrongCode("No till code on this device.");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const hint = setTimeout(() => { $("working-hint").hidden = false; }, 5000);
+  let response;
+  try {
+    response = await fetch(path, {
+      method,
+      headers: { "X-Demo-Key": code, ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: controller.signal,
+    });
+  } catch {
+    throw new TillError("Can't reach the server. Check the connection and try again.");
+  } finally {
+    clearTimeout(timer);
+    clearTimeout(hint);
+    $("working-hint").hidden = true;
+  }
+  if (response.status === 404) throw new WrongCode("The till code is not right.");
+  if (response.status === 422) throw new TillError(`The amount must be between ${formatRand(MIN_CENTS)} and ${formatRand(MAX_CENTS)}.`);
+  if (!response.ok) throw new TillError("Something went wrong on the server. Try again.");
+  return response.json();
+}
+
+/* --- setup ------------------------------------------------------------------ */
+$("setup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const code = $("code").value.trim();
+  if (!code) return;
+  setCode(code);
+  setError("setup-error", "");
+  show("working"); $("working-text").textContent = "Checking the till code…";
+  try {
+    await demoRequest("GET", "/demo/float");
+    $("code").value = "";
+    show("sell");
+  } catch (err) {
+    forgetCode();
+    show("setup");
+    setError("setup-error", err instanceof WrongCode ? "That till code is not right. Check it with the manager." : err.message);
+  }
+});
+
+/* --- selling ------------------------------------------------------------------ */
+let pendingCents = null;
+
+function askToSell(cents) {
+  setError("sell-error", "");
+  if (cents === null) { setError("sell-error", "Type an amount in rand, like 150 or 150.50."); return; }
+  if (cents < MIN_CENTS || cents > MAX_CENTS) {
+    setError("sell-error", `The amount must be between ${formatRand(MIN_CENTS)} and ${formatRand(MAX_CENTS)}.`);
+    return;
+  }
+  pendingCents = cents;
+  $("confirm-amount").textContent = formatRand(cents);
+  show("confirm");
+  $("confirm-yes").focus();
+}
+
+for (const rand of AMOUNTS_RAND) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "amount";
+  button.textContent = formatRand(rand * 100).replace(/\.00$/, "");
+  button.addEventListener("click", () => askToSell(rand * 100));
+  $("amounts").appendChild(button);
+}
+$("other-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  askToSell(randToCents($("other").value));
+});
+$("confirm-no").addEventListener("click", () => { pendingCents = null; show("sell"); });
+
+$("confirm-yes").addEventListener("click", async () => {
+  if (pendingCents === null) return;
+  const cents = pendingCents;
+  pendingCents = null; // one tap, one voucher
+  show("working"); $("working-text").textContent = "Creating voucher…";
+  try {
+    const voucher = await demoRequest("POST", "/demo/vouchers", { amount_cents: cents });
+    $("slip-amount").textContent = voucher.amount_display;
+    $("slip-pin").textContent = groupPin(voucher.pin);
+    $("slip-serial").textContent = voucher.serial;
+    $("slip-time").textContent = new Date(voucher.issued_at).toLocaleString("en-ZA", {
+      timeZone: "Africa/Johannesburg", dateStyle: "medium", timeStyle: "short",
+    });
+    $("other").value = "";
+    show("slip");
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); setError("setup-error", "The till code is not right any more. Enter it again."); return; }
+    show("sell");
+    setError("sell-error", `${err.message} No voucher was created.`);
+  }
+});
+
+$("print").addEventListener("click", () => window.print());
+$("new-sale").addEventListener("click", () => { setError("sell-error", ""); show("sell"); });
+
+/* --- manager: the float ----------------------------------------------------- */
+async function loadFloat() {
+  setError("manager-error", "");
+  $("float-available").textContent = "…";
+  $("float-settlement").textContent = "…";
+  try {
+    const f = await demoRequest("GET", "/demo/float");
+    $("float-available").textContent = f.available_display;
+    $("float-settlement").textContent = f.settlement_display;
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); return; }
+    setError("manager-error", err.message);
+  }
+}
+
+$("to-manager").addEventListener("click", () => { show("manager"); loadFloat(); });
+$("to-sell").addEventListener("click", () => show("sell"));
+$("forget-code").addEventListener("click", () => { forgetCode(); show("setup"); $("code").focus(); });
+
+$("topup-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setError("manager-error", "");
+  const cents = randToCents($("topup").value);
+  if (cents === null || cents <= 0) { setError("manager-error", "Type an amount in rand, like 10000."); return; }
+  if (!window.confirm(`Top up the float by ${formatRand(cents)}?`)) return;
+  try {
+    const f = await demoRequest("POST", "/demo/float", { amount_cents: cents });
+    $("float-available").textContent = f.available_display;
+    $("float-settlement").textContent = f.settlement_display;
+    $("topup").value = "";
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); return; }
+    setError("manager-error", err.message.replace(/^The amount must be between .*$/, "A top-up must be at most R1 000 000."));
+  }
+});
+
+show(getCode() ? "sell" : "setup");
+</script>
+</body>
+</html>
