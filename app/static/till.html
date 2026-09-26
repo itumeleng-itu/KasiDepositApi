@@ -48,7 +48,7 @@
   .row { display: flex; gap: 12px; margin-top: 12px; }
   .row > * { flex: 1; }
   label { display: block; font-weight: 600; margin-bottom: 6px; }
-  input {
+  input, select {
     font: inherit; width: 100%; min-height: 52px; padding: 10px 12px;
     border: 1px solid var(--line); border-radius: 10px; background: var(--panel); color: var(--ink);
   }
@@ -152,6 +152,29 @@
       <div class="row"><button type="submit" class="primary">Top up</button></div>
     </form>
     <div id="manager-error" class="error" role="alert" hidden></div>
+
+    <h2>PayShap numbers (demo)</h2>
+    <p class="muted">There is no connection to PayShap in the demo. A number listed here
+      is "registered for PayShap" in this person's name at this bank, so the app can check
+      it when they add it. Numbers not listed follow the test scenarios.</p>
+    <ul id="shapid-list" class="muted"></ul>
+    <form id="shapid-form">
+      <label for="shapid-number">Cellphone number</label>
+      <input id="shapid-number" inputmode="tel" autocomplete="off" placeholder="e.g. 082 555 1234">
+      <label for="shapid-name">Account holder's name (as registered in the app)</label>
+      <input id="shapid-name" autocomplete="off" placeholder="e.g. Thabo Mokoena">
+      <label for="shapid-bank">Bank</label>
+      <select id="shapid-bank">
+        <option value="CAPITEC">Capitec</option><option value="FNB">FNB</option>
+        <option value="STANDARD_BANK">Standard Bank</option><option value="ABSA">Absa</option>
+        <option value="NEDBANK">Nedbank</option><option value="TYMEBANK">TymeBank</option>
+        <option value="AFRICAN_BANK">African Bank</option><option value="DISCOVERY_BANK">Discovery Bank</option>
+        <option value="BANK_ZERO">Bank Zero</option><option value="INVESTEC">Investec</option>
+      </select>
+      <div class="row"><button type="submit" class="primary">Add number</button></div>
+    </form>
+    <div id="shapid-error" class="error" role="alert" hidden></div>
+
     <div class="row">
       <button type="button" class="secondary" id="to-sell">Back to till</button>
     </div>
@@ -336,7 +359,69 @@ async function loadFloat() {
   }
 }
 
-$("to-manager").addEventListener("click", () => { show("manager"); loadFloat(); });
+/* --- manager: the demo PayShap directory --------------------------------------- */
+async function loadShapIds() {
+  setError("shapid-error", "");
+  const list = $("shapid-list");
+  try {
+    const entries = await demoRequest("GET", "/demo/shapids");
+    list.replaceChildren();
+    if (entries.length === 0) {
+      const empty = document.createElement("li");
+      empty.textContent = "No numbers listed yet.";
+      list.append(empty);
+    }
+    for (const e of entries) {
+      const item = document.createElement("li");
+      item.textContent = `${e.number.replace(/^\+27/, "0")} · ${e.shap_name} · ${e.bank} `;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "link";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", async () => {
+        if (!window.confirm(`Remove ${e.shap_name}'s number from the directory?`)) return;
+        try { await demoRequestNoBody("DELETE", `/demo/shapids/${encodeURIComponent(e.number)}`); }
+        catch (err) { setError("shapid-error", err.message); }
+        loadShapIds();
+      });
+      item.append(remove);
+      list.append(item);
+    }
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); return; }
+    setError("shapid-error", err.message);
+  }
+}
+
+// DELETE answers 204 with no body.
+async function demoRequestNoBody(method, path) {
+  const response = await fetch(path, { method, headers: { "X-Demo-Key": getCode() || "" } });
+  if (!response.ok) throw new TillError("Couldn't remove that number. Try again.");
+}
+
+$("shapid-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  setError("shapid-error", "");
+  const body = {
+    number: $("shapid-number").value.trim(),
+    full_name: $("shapid-name").value.trim(),
+    bank: $("shapid-bank").value,
+  };
+  if (!body.number || !body.full_name) { setError("shapid-error", "Type the number and the name."); return; }
+  try {
+    await demoRequest("POST", "/demo/shapids", body);
+    $("shapid-number").value = "";
+    $("shapid-name").value = "";
+    loadShapIds();
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); return; }
+    setError("shapid-error", err.message.startsWith("The amount")
+      ? "Check the number (e.g. 082 555 1234) and type a first name and surname."
+      : err.message);
+  }
+});
+
+$("to-manager").addEventListener("click", () => { show("manager"); loadFloat(); loadShapIds(); });
 $("to-sell").addEventListener("click", () => show("sell"));
 $("forget-code").addEventListener("click", () => { forgetCode(); show("setup"); $("code").focus(); });
 

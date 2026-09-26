@@ -19,7 +19,7 @@ from app.ledger import balance_of, fund_float
 from app.main import create_app
 from app.models import LedgerAccount, Voucher, VoucherStatus
 from app.payouts import COMPLETED_AFTER_SECONDS, MockPayoutProvider
-from tests.conftest import assert_ledger_balanced
+from tests.conftest import assert_ledger_balanced, sign_in
 
 FLOAT = 1_000_000  # R10 000
 
@@ -53,6 +53,9 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
     vended = api.post("/demo/vouchers", json={"amount_cents": 50000})
     assert vended.status_code == 201
     pin = vended.json()["pin"]
+
+    # She registers once; the app sends the token on every call from now on.
+    sign_in(api)
 
     # The app: the PIN goes to the server once, and comes back as a token.
     lookup = api.post("/v1/vouchers/lookup", json={"pin": pin})

@@ -6,6 +6,7 @@ pydantic>=2.7,<3
 pydantic-settings>=2.4,<3
 tzdata>=2024.1
 segno>=1.6,<2
+cryptography>=43,<47
 
 # Postgres driver. On Linux hosts (Render) the binary package bundles libpq.
 # On Windows it is left out: Smart App Control blocks its unsigned DLLs, so

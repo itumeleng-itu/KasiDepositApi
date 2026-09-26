@@ -26,7 +26,7 @@ from app.payouts import (
     ProviderStatus,
 )
 from app.switch import VoucherSwitch
-from tests.conftest import assert_ledger_balanced
+from tests.conftest import assert_ledger_balanced, sign_in
 
 SHAP = {"kind": "shap_id", "shap_id": "+27821234560"}
 FLOAT = 10_000_000  # R100 000
@@ -74,7 +74,7 @@ def provider(clock: FakeClock) -> SwitchableProvider:
 @pytest.fixture
 def api(clean_db: Engine, test_settings: Settings, provider: SwitchableProvider) -> Iterator[TestClient]:
     with TestClient(create_app(test_settings, payout_provider=provider)) as client:
-        yield client
+        yield sign_in(client)
 
 
 def _fund(engine: Engine, cents: int = FLOAT) -> None:

@@ -78,6 +78,11 @@ class Settings(BaseSettings):
     # Secret that /demo requests must present in the X-Demo-Key header. Required
     # when the demo routes are on in production; optional elsewhere.
     demo_api_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
+    # Secret that SA ID numbers and bank account numbers are encrypted and
+    # hashed under (app/pii.py). Unset: the API still serves, but refuses to
+    # register users or take account payouts, so nothing personal is ever
+    # stored unencrypted. Losing it makes stored ciphertexts unrecoverable.
+    pii_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
 
     @field_validator("database_url")
     @classmethod

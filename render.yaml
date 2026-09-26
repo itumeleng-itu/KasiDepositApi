@@ -32,3 +32,8 @@ services:
         value: "true"
       - key: DEMO_API_KEY
         generateValue: true
+      # Encrypts SA ID and bank account numbers (app/pii.py). Entered in the
+      # dashboard, and the SAME value as in local .env: both write to the one
+      # database. If it is lost, the stored numbers cannot be decrypted.
+      - key: PII_KEY
+        sync: false

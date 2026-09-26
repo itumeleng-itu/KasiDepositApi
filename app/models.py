@@ -5,23 +5,26 @@ Only `app/switch.py` may touch `Voucher` — everything else goes through the
 switch (see its module docstring).
 
 Not visible here, because they live in the migration rather than in table
-metadata (see alembic/versions/0004): the `updated_at` triggers on `deposits`
-and `payouts`, the append-only trigger on `ledger_entries`, and the deferred
+metadata (see alembic/versions/0004 and 0005): the `updated_at` triggers on
+`deposits`, `payouts` and `users`, the append-only trigger on `ledger_entries`, and the deferred
 check that every ledger `entry_group` sums to zero.
 """
 
 import enum
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Enum,
     ForeignKey,
     Index,
+    LargeBinary,
     MetaData,
     Text,
     Uuid,
@@ -143,10 +146,12 @@ class Deposit(Base):
     amount_cents: Mapped[Cents] = mapped_column(BigInteger, nullable=False)
     fee_cents: Mapped[Cents] = mapped_column(BigInteger, nullable=False)
     payout_cents: Mapped[Cents] = mapped_column(BigInteger, nullable=False)
-    # POPIA: for kind "account" this holds a bank account number, which is
-    # personal information. Nothing constructs that kind today (the app only
-    # sends ShapIDs), but a retention and encryption decision is needed before
-    # the account path goes live. It must not go live without one.
+    # Null only for deposits made before users existed (migration 0005).
+    user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("users.id"))
+    # POPIA. kind "shap_id": {shap_id, shap_name, bank_id}; shap_name is the
+    # scheme's MASKED display name, kept so history can say who was paid.
+    # kind "account": {name, bank_id, account_last4, account_number_encrypted}.
+    # The account number is never stored in plaintext: see app/pii.py.
     destination: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     status: Mapped[DepositStatus] = mapped_column(
         _pg_enum(DepositStatus, "deposit_status"), nullable=False
@@ -173,6 +178,10 @@ class Deposit(Base):
         ),
         CheckConstraint("reference ~ '^KD-[A-HJ-NP-Z2-9]{6}$'", name="reference_format"),
         CheckConstraint("destination ? 'kind'", name="destination_has_kind"),
+        CheckConstraint(
+            "NOT (destination ? 'account_number')", name="destination_no_plain_account_number"
+        ),
+        Index("ix_deposits_user_id_created_at", "user_id", text("created_at DESC")),
     )
     __mapper_args__ = {"eager_defaults": True}
 
@@ -250,3 +259,158 @@ class Payout(Base):
 
     __table_args__ = (CheckConstraint("amount_cents > 0", name="amount_cents_positive"),)
     __mapper_args__ = {"eager_defaults": True}
+
+
+class UserStatus(enum.StrEnum):
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+
+
+class User(Base):
+    """Someone registered from the app (POST /v1/users, app/users.py): who
+    they are. Where they are paid is `PayoutMethod`, added after registering.
+
+    The SA ID number is never stored in plaintext: `id_number_hash` (keyed
+    HMAC) finds a returning user and enforces one account per ID;
+    `id_number_encrypted` (AES-GCM) keeps the verified identity. See app/pii.py.
+    `updated_at` is maintained by a database trigger.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    full_names: Mapped[str] = mapped_column(Text, nullable=False)
+    id_number_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    id_number_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    date_of_birth: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[UserStatus] = mapped_column(
+        _pg_enum(UserStatus, "user_status"), nullable=False, server_default=UserStatus.ACTIVE.value
+    )
+    verification_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("char_length(full_names) BETWEEN 3 AND 100", name="full_names_length"),
+        CheckConstraint("id_number_hash ~ '^[0-9a-f]{64}$'", name="id_number_hash_format"),
+        CheckConstraint("octet_length(id_number_encrypted) > 12", name="id_number_encrypted_present"),
+    )
+    __mapper_args__ = {"eager_defaults": True}
+
+
+class UserSession(Base):
+    """A bearer token issued to one phone. Only its SHA-256 is stored."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("token_hash ~ '^[0-9a-f]{64}$'", name="token_hash_format"),
+    )
+
+
+class PayoutMethodKind(enum.StrEnum):
+    SHAP_ID = "shap_id"
+    ACCOUNT = "account"
+
+
+class PayoutMethod(Base):
+    """Where a user can be paid, checked when added (app/payout_methods.py).
+
+    A PayShap number was resolved in the directory and its name matched the
+    user; a bank account was verified to belong to the user's ID number. The
+    account number is ciphertext (app/pii.py), with a keyed hash so the same
+    account cannot be added twice. At most one default per user.
+    """
+
+    __tablename__ = "payout_methods"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id"), nullable=False, index=True
+    )
+    kind: Mapped[PayoutMethodKind] = mapped_column(
+        _pg_enum(PayoutMethodKind, "payout_method_kind"), nullable=False
+    )
+    bank_id: Mapped[str] = mapped_column(Text, nullable=False)
+    shap_id: Mapped[str | None] = mapped_column(Text)
+    # The scheme's MASKED display name ("T. Mokoena"), never a full legal name.
+    shap_name: Mapped[str | None] = mapped_column(Text)
+    account_holder: Mapped[str | None] = mapped_column(Text)
+    account_last4: Mapped[str | None] = mapped_column(Text)
+    account_number_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary)
+    account_number_hash: Mapped[str | None] = mapped_column(Text)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    verification_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(kind = 'shap_id' AND shap_id IS NOT NULL AND shap_name IS NOT NULL"
+            " AND account_holder IS NULL AND account_last4 IS NULL"
+            " AND account_number_encrypted IS NULL AND account_number_hash IS NULL)"
+            " OR (kind = 'account' AND shap_id IS NULL AND shap_name IS NULL"
+            " AND account_holder IS NOT NULL AND account_last4 ~ '^[0-9]{4}$'"
+            " AND octet_length(account_number_encrypted) > 12"
+            " AND account_number_hash ~ '^[0-9a-f]{64}$')",
+            name="fields_match_kind",
+        ),
+        CheckConstraint(
+            r"shap_id IS NULL OR shap_id ~ '^\+27[678][0-9]{8}(@[a-z_]+)?$'",
+            name="shap_id_format",
+        ),
+        Index("uq_payout_methods_one_default", "user_id", unique=True, postgresql_where=text("is_default")),
+        Index(
+            "uq_payout_methods_user_shap_id",
+            "user_id",
+            "shap_id",
+            unique=True,
+            postgresql_where=text("shap_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_payout_methods_user_account",
+            "user_id",
+            "account_number_hash",
+            unique=True,
+            postgresql_where=text("account_number_hash IS NOT NULL"),
+        ),
+    )
+    __mapper_args__ = {"eager_defaults": True}
+
+
+class DemoShapId(Base):
+    """DEMO SCAFFOLDING: our stand-in for PayShap's proxy directory. A number
+    here resolves to this name and bank (app/shapid.py). Filled from the till
+    page; the mobile app never writes it."""
+
+    __tablename__ = "demo_shapids"
+
+    number: Mapped[str] = mapped_column(Text, primary_key=True)  # E.164, no @bank
+    shap_name: Mapped[str] = mapped_column(Text, nullable=False)
+    bank_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(r"number ~ '^\+27[678][0-9]{8}$'", name="number_format"),
+        CheckConstraint("char_length(shap_name) BETWEEN 3 AND 60", name="shap_name_length"),
+    )

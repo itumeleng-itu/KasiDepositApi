@@ -68,9 +68,10 @@ def test_a_keyed_demo_is_left_out_of_the_openapi_schema(keyed_api: TestClient) -
     assert "/v1/deposits" in paths
 
 
-def test_v1_needs_no_key(keyed_api: TestClient) -> None:
+def test_v1_needs_no_demo_key(keyed_api: TestClient) -> None:
+    # Answered by /v1's own sign-in check, not hidden behind the demo key's 404.
     response = keyed_api.post("/v1/vouchers/lookup", json={"pin": "0000000000000000"})
-    assert (response.status_code, response.json()) == (404, {"reason": "voucher_not_found"})
+    assert (response.status_code, response.json()) == (401, {"reason": "not_registered"})
 
 
 # --- the float endpoints -----------------------------------------------------------------
@@ -109,7 +110,7 @@ def test_production_serves_no_docs(production_api: TestClient, path: str) -> Non
 
 def test_production_serves_health_v1_and_a_keyed_demo(production_api: TestClient) -> None:
     assert production_api.get("/health").json() == {"status": "ok", "database": "ok"}
-    assert production_api.post("/v1/vouchers/lookup", json={"pin": "0000000000000000"}).status_code == 404
+    assert production_api.post("/v1/vouchers/lookup", json={"pin": "0000000000000000"}).status_code == 401
     assert production_api.get("/demo/float").status_code == 404
     assert production_api.get("/demo/float", headers=KEYED).status_code == 200
 
