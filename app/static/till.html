@@ -56,6 +56,8 @@
   .big { font-size: 28px; font-weight: 700; margin: 4px 0 12px; }
   .slip { background: var(--ok-bg); text-align: center; }
   .pin { font: 700 30px/1.2 ui-monospace, "Cascadia Mono", Consolas, monospace; letter-spacing: 1px; margin: 12px 0; word-spacing: 6px; }
+  .qr { width: 200px; height: 200px; margin: 8px auto; background: #fff; padding: 6px; border-radius: 8px; }
+  .qr svg { display: block; width: 100%; height: 100%; }
   .slip dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; margin: 12px auto 0; max-width: 320px; }
   .slip dt { color: var(--muted); }
   .slip dd { margin: 0; font-weight: 600; }
@@ -65,6 +67,7 @@
     body * { visibility: hidden; }
     #slip, #slip * { visibility: visible; }
     #slip { position: absolute; inset: 0 auto auto 0; width: 100%; background: #fff; border: 0; }
+    .qr { width: 40mm; height: 40mm; padding: 0; }
     .noprint { display: none !important; }
   }
 </style>
@@ -125,11 +128,12 @@
     <p class="big" id="slip-amount"></p>
     <div class="muted">Voucher PIN</div>
     <div class="pin" id="slip-pin"></div>
+    <div class="qr" id="slip-qr" role="img" aria-label="QR code for this voucher"></div>
     <dl>
       <dt>Serial</dt><dd id="slip-serial"></dd>
       <dt>Issued</dt><dd id="slip-time"></dd>
     </dl>
-    <p class="muted">Deposit it in the KasiDeposit app. It can be used once.</p>
+    <p class="muted">In the KasiDeposit app, scan the QR code or type the PIN. It can be used once.</p>
     <div class="row noprint">
       <button type="button" class="secondary" id="print">Print</button>
       <button type="button" class="primary" id="new-sale">New sale</button>
@@ -195,6 +199,21 @@ function formatRand(cents) {
   return `${sign}R${rand}.${String(abs % 100).padStart(2, "0")}`;
 }
 function groupPin(pin) { return pin.replace(/(\d{4})(?=\d)/g, "$1 "); }
+
+/* The server's QR (inline SVG from app/qr.py), parsed as SVG rather than
+   inserted as HTML, so nothing but an <svg> element can reach the page. */
+function showQr(svgText) {
+  const box = $("slip-qr");
+  box.replaceChildren();
+  const doc = new DOMParser().parseFromString(svgText || "", "image/svg+xml");
+  const svg = doc.documentElement;
+  if (svg && svg.nodeName === "svg" && !doc.querySelector("parsererror")) {
+    box.appendChild(document.importNode(svg, true));
+    box.hidden = false;
+  } else {
+    box.hidden = true; // the PIN is still there to type
+  }
+}
 
 class TillError extends Error {}
 class WrongCode extends TillError {}
@@ -285,6 +304,7 @@ $("confirm-yes").addEventListener("click", async () => {
     const voucher = await demoRequest("POST", "/demo/vouchers", { amount_cents: cents });
     $("slip-amount").textContent = voucher.amount_display;
     $("slip-pin").textContent = groupPin(voucher.pin);
+    showQr(voucher.qr_svg);
     $("slip-serial").textContent = voucher.serial;
     $("slip-time").textContent = new Date(voucher.issued_at).toLocaleString("en-ZA", {
       timeZone: "Africa/Johannesburg", dateStyle: "medium", timeStyle: "short",
