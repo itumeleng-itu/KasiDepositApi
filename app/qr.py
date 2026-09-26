@@ -11,6 +11,7 @@ redeemable once by whoever holds it. It is made on the server, so the till
 page loads no script and the PIN never appears in a URL we serve.
 """
 
+import io
 import re
 
 import segno
@@ -31,7 +32,13 @@ def voucher_qr_svg(pin: str) -> str:
 
     Error correction M survives a creased or smudged slip; black on white,
     with the standard four-module quiet zone, scans reliably when printed.
+
+    It carries the SVG namespace (segno's svg_inline leaves it out): the till
+    page parses it with DOMParser as image/svg+xml, and without xmlns the
+    elements are not SVG and the browser draws nothing.
     """
     qr = segno.make(voucher_payload(pin), error="m", micro=False)
-    svg: str = qr.svg_inline(scale=1, border=4, omitsize=True, dark="#000", light="#fff")
-    return svg
+    buff = io.BytesIO()
+    qr.save(buff, kind="svg", xmldecl=False, svgns=True, nl=False,
+            scale=1, border=4, omitsize=True, dark="#000", light="#fff")
+    return buff.getvalue().decode("utf-8")

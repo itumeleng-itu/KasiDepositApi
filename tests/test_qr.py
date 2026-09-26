@@ -27,13 +27,15 @@ def test_the_svg_is_the_qr_of_that_payload() -> None:
     pin = "5008731775025283"
     svg = voucher_qr_svg(pin)
     expected = segno.make(voucher_payload(pin), error="m", micro=False)
-    assert svg == expected.svg_inline(scale=1, border=4, omitsize=True, dark="#000", light="#fff")
+    inline = expected.svg_inline(scale=1, border=4, omitsize=True, dark="#000", light="#fff")
+    assert svg == inline.replace("<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
     assert expected.error == "M"
 
 
 def test_the_svg_is_sized_by_viewbox_black_on_white() -> None:
     svg = voucher_qr_svg("5008731775025283")
-    assert svg.startswith("<svg viewBox=")
+    assert svg.startswith("<svg ")
+    assert 'xmlns="http://www.w3.org/2000/svg"' in svg.split(">", 1)[0]  # DOMParser needs it to render
     assert "width=" not in svg.split(">", 1)[0]  # the page chooses the size
     assert 'stroke="#000"' in svg and 'fill="#fff"' in svg
     assert "<script" not in svg
