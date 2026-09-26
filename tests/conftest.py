@@ -13,7 +13,9 @@
   if missing.
 """
 
+import uuid
 from collections.abc import Iterator
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -27,9 +29,16 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.db import make_engine, make_session_factory
 from app.main import create_app
-from app.models import Base, LedgerEntry
+from app.models import Base, LedgerEntry, User, UserStatus
+from app.pii import SA_ID, PiiCipher
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# A fixed key for the test run only; never used outside TEST_SCHEMA.
+TEST_PII_KEY = "test-only-pii-key-0123456789abcdef-not-secret"
+
+# A valid adult SA ID whose sequence digits (5009) the mock verifier accepts.
+REGISTRATION = {"full_names": "Thabo Mokoena", "id_number": "8001015009087"}
 
 
 def check_schemas(test_schema: str, dev_schema: str) -> None:
@@ -50,6 +59,7 @@ def load_test_settings() -> Settings:
             enable_demo_routes=True,
             min_voucher_cents=1000,
             max_voucher_cents=500000,
+            pii_key=TEST_PII_KEY,
         )
     except ValidationError as exc:
         raise pytest.UsageError(f"Cannot load settings for the test run:\n{exc}") from exc
@@ -138,6 +148,37 @@ def db_session(clean_db: Engine) -> Iterator[Session]:
 def client(clean_db: Engine, test_settings: Settings) -> Iterator[TestClient]:
     with TestClient(create_app(test_settings)) as c:
         yield c
+
+
+def register(client: TestClient, **overrides: str) -> str:
+    """Register through the API and return the bearer token."""
+    response = client.post("/v1/users", json={**REGISTRATION, **overrides})
+    assert response.status_code in (200, 201), response.text
+    token: str = response.json()["access_token"]
+    return token
+
+
+def sign_in(client: TestClient, **overrides: str) -> TestClient:
+    """Register, then send the token on every later request from `client`."""
+    client.headers["Authorization"] = f"Bearer {register(client, **overrides)}"
+    return client
+
+
+def make_user(session: Session, id_number: str = "8001015009087") -> uuid.UUID:
+    """A user row written directly, for tests below the HTTP layer."""
+    pii = PiiCipher(TEST_PII_KEY)
+    user = User(
+        full_names="Thabo Mokoena",
+        id_number_hash=pii.lookup_hash(id_number, SA_ID),
+        id_number_encrypted=pii.encrypt(id_number, SA_ID),
+        date_of_birth=date(1980, 1, 1),
+        status=UserStatus.ACTIVE,
+        verification_ref="test",
+        verified_at=datetime.now(UTC),
+    )
+    session.add(user)
+    session.commit()
+    return user.id
 
 
 def assert_ledger_balanced(session: Session) -> None:

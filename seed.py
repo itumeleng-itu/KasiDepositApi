@@ -6,8 +6,10 @@
     python seed.py --fund 10000       # top up the settlement float by R10 000
     python seed.py --reset --yes --fund 10000 --count 20
 
---reset clears all demo data: vouchers, deposits, payouts, voucher tokens and
-the whole ledger, including the float. --fund posts `settlement +X, capital -X`
+--reset clears all demo data: vouchers, deposits, payouts, voucher tokens,
+the whole ledger (including the float), registered users with their sessions
+and payout methods, and the demo PayShap directory. After a reset, anyone
+using the app registers again. --fund posts `settlement +X, capital -X`
 through the ledger; on its own it vends nothing (add --count to vend too).
 
 Refuses to run unless ENVIRONMENT=development. Vouchers are vended through
@@ -27,12 +29,34 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings, get_settings
 from app.db import make_engine, make_session_factory
 from app.ledger import balance_of, fund_float
-from app.models import Base, Deposit, LedgerAccount, LedgerEntry, Payout, Voucher, VoucherToken
+from app.models import (
+    Base,
+    DemoShapId,
+    Deposit,
+    LedgerAccount,
+    LedgerEntry,
+    Payout,
+    PayoutMethod,
+    User,
+    UserSession,
+    Voucher,
+    VoucherToken,
+)
 from app.money import format_rand, rand_to_cents
 from app.switch import VendedVoucher, VoucherSwitch
 
 # Everything --reset clears, children before parents.
-RESET_TABLES: tuple[type[Base], ...] = (Payout, LedgerEntry, Deposit, VoucherToken, Voucher)
+RESET_TABLES: tuple[type[Base], ...] = (
+    Payout,
+    LedgerEntry,
+    Deposit,
+    VoucherToken,
+    Voucher,
+    PayoutMethod,
+    UserSession,
+    User,
+    DemoShapId,
+)
 
 # Realistic spaza denominations.
 DEMO_AMOUNTS_RAND = (50, 100, 200, 500, 1000)

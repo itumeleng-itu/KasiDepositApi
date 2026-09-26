@@ -2,7 +2,9 @@
 
 These endpoints stand in for the till at the spaza shop that takes cash and
 prints a PIN. In the real product that terminal belongs to the issuer, not to
-us. They also let the demo operator top up and inspect the float.
+us. They also let the demo operator top up and inspect the float, and keep the
+demo PayShap directory (/demo/shapids): the numbers that resolve to a real
+name and bank in the demo, since we have no connection to PayShap itself.
 
 - They must never be exposed to, or called by, the mobile app. The app only
   ever redeems; it can never vend.
@@ -23,12 +25,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import get_session
 from app.ledger import available_float, balance_of, fund_float
-from app.models import LedgerAccount
+from app.models import DemoShapId, LedgerAccount
+from app.schemas.demo_shapid import AddDemoShapIdRequest, DemoShapIdResponse, normalise_number
 from app.schemas.float import FloatResponse, FundFloatRequest
 from app.schemas.voucher import VendRequest, VendResponse, VoucherListItem
 from app.switch import AmountOutOfRange, VoucherSwitch
@@ -98,6 +102,42 @@ def top_up_float(body: FundFloatRequest, session: SessionDep) -> FloatResponse:
     fund_float(session, body.amount_cents)
     session.commit()
     return _float(session)
+
+
+@router.get("/shapids")
+def list_demo_shapids(session: SessionDep) -> list[DemoShapIdResponse]:
+    """The demo PayShap directory, newest first."""
+    entries = session.scalars(select(DemoShapId).order_by(DemoShapId.created_at.desc())).all()
+    response = [DemoShapIdResponse.of(e) for e in entries]
+    session.rollback()
+    return response
+
+
+@router.post("/shapids", status_code=status.HTTP_201_CREATED)
+def add_demo_shapid(body: AddDemoShapIdRequest, session: SessionDep) -> DemoShapIdResponse:
+    """List a number (or replace its entry): it now resolves to this person and bank."""
+    entry = session.get(DemoShapId, body.number)
+    if entry is None:
+        entry = DemoShapId(number=body.number, shap_name=body.full_name, bank_id=body.bank)
+        session.add(entry)
+    else:
+        entry.shap_name, entry.bank_id = body.full_name, body.bank
+    session.commit()
+    return DemoShapIdResponse.of(entry)
+
+
+@router.delete("/shapids/{number}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_demo_shapid(number: str, session: SessionDep) -> Response:
+    try:
+        key = normalise_number(number)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND) from None
+    entry = session.get(DemoShapId, key)
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+    session.delete(entry)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 def _is_demo_path(path: str) -> bool:

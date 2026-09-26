@@ -6,8 +6,14 @@ before any clearing message exists. Only then does money move. So a
 resolution failure means nothing was charged and nothing needs reversing, and
 the deposit flow resolves the destination before it charges the voucher.
 
-This mock matches the mobile app's fake (src/api/fake.ts in the app, and its
-TESTING.md) scenario for scenario, keyed off the number's last digit:
+First the DEMO DIRECTORY (`demo_shapids`, filled from the till page): a
+number listed there resolves to its name and bank, so a presenter's own
+number shows their own name. With an @bank suffix for a different bank, it is
+not found there.
+
+Any other number falls back to the scripted scenarios, which match the mobile
+app's fake (src/api/fake.ts in the app, and its TESTING.md), keyed off the
+number's last digit:
 
     9     shapid_not_found
     8     shapid_suspended
@@ -20,9 +26,13 @@ number starting 6, 7 or 8, optionally `@<bank>`) is shapid_invalid_format.
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
+from sqlalchemy.orm import Session
+
 from app.banks import BankId, parse_bank_id
+from app.models import DemoShapId
 
 _SHAP_ID = re.compile(r"^(?P<number>\+27[678]\d{8})(?:@(?P<bank>[A-Za-z_]+))?$")
 
@@ -63,7 +73,24 @@ class ShapIdAmbiguous(ShapIdError):
     reason = "shapid_ambiguous"
 
 
-def resolve(shap_id: str) -> ResolvedShapId:
+# number (E.164, no suffix) -> (masked name, bank), or None if not listed.
+Directory = Callable[[str], tuple[str, BankId] | None]
+
+
+def demo_directory(session: Session) -> Directory:
+    """The demo directory, read through `session`."""
+
+    def lookup(number: str) -> tuple[str, BankId] | None:
+        entry = session.get(DemoShapId, number)
+        if entry is None:
+            return None
+        bank = parse_bank_id(entry.bank_id)
+        return None if bank is None else (entry.shap_name, bank)
+
+    return lookup
+
+
+def resolve(shap_id: str, directory: Directory | None = None) -> ResolvedShapId:
     """Resolve a ShapID or raise the ShapIdError for its scenario."""
     match = _SHAP_ID.fullmatch(shap_id)
     if match is None:
@@ -74,6 +101,13 @@ def resolve(shap_id: str) -> ResolvedShapId:
         suffix = parse_bank_id(match["bank"].lower())
         if suffix is None:
             raise ShapIdInvalidFormat(shap_id)
+
+    listed = directory(match["number"]) if directory is not None else None
+    if listed is not None:
+        shap_name, bank = listed
+        if suffix is not None and suffix != bank:
+            raise ShapIdNotFound(shap_id)
+        return ResolvedShapId(shap_id=shap_id, shap_name=shap_name, bank_id=bank)
 
     last_digit = match["number"][-1]
     if last_digit == "9":

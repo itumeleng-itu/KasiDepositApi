@@ -24,7 +24,7 @@ from app.ledger import fund_float
 from app.models import Deposit, DepositStatus, LedgerAccount, LedgerEntry
 from app.payouts import MockPayoutProvider
 from app.switch import VoucherSwitch
-from tests.conftest import assert_ledger_balanced
+from tests.conftest import assert_ledger_balanced, make_user
 
 S = DepositStatus
 JOIN_TIMEOUT_SECONDS = 60
@@ -119,6 +119,7 @@ def test_two_simultaneous_requests_with_one_key_make_one_deposit(clean_db: Engin
         fund_float(session, 1_000_000)
         pin = switch.vend(session, 50000).pin
         session.commit()
+        user_id = make_user(session)
         token = service.lookup_voucher(session, pin).voucher_token
 
     key = str(uuid.uuid4())
@@ -130,7 +131,7 @@ def test_two_simultaneous_requests_with_one_key_make_one_deposit(clean_db: Engin
             with factory() as session:
                 start.wait(timeout=JOIN_TIMEOUT_SECONDS)
                 outcome = service.create_deposit(
-                    session, token, {"kind": "shap_id", "shap_id": "+27821234560"}, key
+                    session, token, {"kind": "shap_id", "shap_id": "+27821234560"}, key, user_id
                 )
             with results.lock:
                 results.views.append(outcome)

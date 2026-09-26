@@ -54,13 +54,15 @@ accepts an amount from the client is wrong.** The one exception is
 `POST /demo/vouchers`, which *creates* a voucher for an amount, the way the
 issuer's till does.
 
-Three seams stand in for third parties, each replaceable by one class:
+Five seams stand in for third parties, each replaceable by one class:
 
 | Seam | Stands in for | File |
 |---|---|---|
 | `VoucherSwitch` | the voucher issuer's switch | `app/switch.py` |
 | `PayoutProvider` (mock) | a payout API such as Stitch or Peach | `app/payouts.py` |
-| ShapID resolution (mock) | PayShap's proxy directory | `app/shapid.py` |
+| ShapID resolution (mock + demo directory) | PayShap's proxy directory | `app/shapid.py` |
+| `IdentityVerifier` (mock) | a Home Affairs (DHA) identity check | `app/identity.py` |
+| `AccountVerifier` (mock) | the banks' account verification (the account belongs to this ID number) | `app/account_verification.py` |
 
 ### `/v1`: the mobile app's API
 
@@ -71,8 +73,39 @@ URL includes `/v1`.
 |---|---|---|
 | `POST /v1/vouchers/lookup` | `{pin}` | `{voucher_token, value_cents, fee_cents, payout_cents}` |
 | `GET /v1/shapid/{shap_id}` | (URL-encoded) | `{shap_name, bank}` |
-| `POST /v1/deposits` | `{voucher_token, destination}` + `Idempotency-Key` header | `{id, reference, status, payout_cents, failure_reason}`: 201 new, 200 replay |
+| `POST /v1/deposits` | `{voucher_token, payout_method_id}` (or the older `{voucher_token, destination}`) + `Idempotency-Key` header | `{id, reference, status, payout_cents, failure_reason}`: 201 new, 200 replay |
 | `GET /v1/deposits/{id}` | | the same deposit shape |
+| `POST /v1/users` | `{full_names, id_number}` | `{user_id, access_token, full_names}`: 201 new, 200 the same person again |
+| `GET /v1/me/payout-methods` | | `{payout_methods: [{id, kind, bank, is_default, shap_id, shap_name, account_holder, account_last4}]}`, default first |
+| `POST /v1/me/payout-methods` | `{kind: "shap_id", shap_id}` or `{kind: "account", bank, account_number}`, optional `make_default` | the method: 201 added, 200 already saved |
+| `POST /v1/me/payout-methods/{id}/default` | | the list |
+| `DELETE /v1/me/payout-methods/{id}` | | the list |
+| `GET /v1/me/deposits` | `?limit=` 1 to 50, default 20 | `{deposits: [{id, reference, status, payout_cents, value_cents, fee_cents, failure_reason, created_at, destination}]}`, newest first |
+
+- **Users.** Every call except `POST /v1/users` and `GET /v1/shapid` needs
+  `Authorization: Bearer <access_token>`. Without a valid one it is 401
+  `{"reason": "not_registered"}`, and the app goes back to its register
+  screen. A deposit is visible only to the user who made it; anyone else gets
+  `deposit_not_found`. Registering is who someone is: it checks the SA ID
+  number (13 digits, a real birth date, the citizenship digit, the Luhn check
+  digit, 18 or older: the same algorithm as the app), the names and the
+  identity mock, then allows one account per ID number. The same ID and names
+  again is the same person on a new phone: the old token is revoked.
+- **Payout methods** are where someone is paid, added after registering and
+  checked when added (`app/payout_methods.py`). A PayShap number must resolve
+  in the directory **and** its masked name must match the user (surname, and
+  the initial of one of their first names: `app/names.py`), else
+  `shapid_name_mismatch`. A bank account must belong to the user's ID number
+  (`account_not_found`, `account_holder_mismatch`), and its holder is always
+  the registered name. Up to 5; the first is the default; a deposit names one
+  by `payout_method_id` and stores a snapshot of it.
+- **Personal numbers are ciphertext.** SA ID numbers and bank account numbers
+  are never stored in plaintext: AES-256-GCM under `PII_KEY`, plus keyed HMACs
+  to find a returning user and refuse a duplicate account (`app/pii.py`). No
+  response ever carries an ID or full account number; accounts come back as
+  their last four digits. Tokens are
+  stored as SHA-256. Without `PII_KEY` the API still serves, but refuses to
+  register (`registration_unavailable`, 503) or take account payouts.
 
 - The PIN is sent once, at lookup. After that the app uses the voucher token,
   which is opaque, single-use and expires after 10 minutes.
@@ -112,6 +145,11 @@ reversal API, and may not expose one.
 | `bank_unavailable` | A R407 voucher (payout R402.00) |
 | `insufficient_float` | `seed.py --reset --yes` then no `--fund`, or a small `--fund` |
 | ShapID not found / suspended / ambiguous | A number ending in 9 / 8 / 7 (7 resolves with `@bank`) |
+| Register | ID `8001015009087` (or any valid adult ID not below) |
+| `id_verification_failed` / `id_number_already_registered` | ID `8001010000081` / `8001010001089` (the identity mock keys off the sequence digits) |
+| A presenter's own PayShap number | List it on the till page's manager screen, **PayShap numbers (demo)**, with their name and bank. It then resolves to their masked name ("T. Mokoena") and adds cleanly; anyone else adding it gets `shapid_name_mismatch` |
+| `shapid_name_mismatch` | Add any unlisted number ending 0-6: it resolves to "M. Mothiba" |
+| `account_not_found` / `account_holder_mismatch` | An account number ending in 9 / 8 |
 
 The mock payout moves to `submitted` after about 1.5s and settles after 3s.
 Only the three amounts above fail; every other payout completes. The ShapID
@@ -125,6 +163,9 @@ scenarios match the app's own fake (see its `TESTING.md`).
 | `GET /demo/vouchers` | the 50 most recent vouchers, PINs masked |
 | `GET /demo/float` | the float: settlement balance, and what is still free to pay out |
 | `POST /demo/float` `{"amount_cents": 1000000}` | tops up the float from capital (up to R1 000 000 at a time) |
+| `GET /demo/shapids` | the demo PayShap directory |
+| `POST /demo/shapids` `{"number": "082 555 1234", "full_name": "Thabo Mokoena", "bank": "FNB"}` | lists a number: it now resolves to "T. Mokoena" at FNB. The till page's manager screen does this. |
+| `DELETE /demo/shapids/{number}` | unlists it |
 
 Safeguards:
 
@@ -259,6 +300,7 @@ generates `DEMO_API_KEY` itself.
 | `DATABASE_URL` | the Supabase **Session pooler** string | enter it in the dashboard; percent-encode special characters in the password (`@` becomes `%40`) |
 | `ENABLE_DEMO_ROUTES` | `true` | set by `render.yaml` |
 | `DEMO_API_KEY` | generated | read it from the dashboard to call `/demo` |
+| `PII_KEY` | the same value as your local `.env` | enter it in the dashboard; local and hosted share one database, so they must share one key. Encrypts ID and account numbers. **Back it up**: losing it makes them unrecoverable, and changing it needs a re-encryption. Unset, registration is refused. |
 
 **What production serves:**
 

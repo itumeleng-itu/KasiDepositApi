@@ -51,8 +51,22 @@ States
 Every status change goes through `transition`, which refuses anything else.
 The app sees four statuses: pending and charged as "pending", paying as
 "submitted", settled as "completed", failed as "failed".
+
+Ownership
+---------
+Every deposit belongs to the user who created it (`user_id`). Reading or
+replaying another user's deposit is `deposit_not_found`, never 403, so ids
+cannot be probed. Listing a user's deposits (`list_deposits`) is read-only: it
+never advances a payout; only `get_deposit` does.
+
+Account numbers
+---------------
+An "account" destination's number is encrypted before it is stored
+(app/pii.py) and decrypted only to instruct the payout. Without PII_KEY the
+account path is refused rather than stored in plaintext.
 """
 
+import base64
 import re
 import secrets
 import uuid
@@ -79,7 +93,8 @@ from app.models import (
 )
 from app.money import Cents
 from app.payouts import PayoutProvider, PayoutRef, PayoutUnavailable
-from app.shapid import ShapIdError, resolve
+from app.pii import ACCOUNT_NUMBER, PiiCipher
+from app.shapid import Directory, ShapIdError, demo_directory, resolve
 from app.switch import AlreadyRedeemed, VoucherNotFound, VoucherSwitch
 
 S = DepositStatus
@@ -168,6 +183,39 @@ class DepositView:
         )
 
 
+@dataclass(frozen=True)
+class DepositRecordView:
+    """One of a user's deposits for their history: what was sent and where."""
+
+    id: uuid.UUID
+    reference: str
+    status: str
+    payout_cents: Cents
+    value_cents: Cents
+    fee_cents: Cents
+    failure_reason: str | None
+    created_at: datetime
+    destination: dict[str, Any]  # public fields only: never an account number
+
+
+def public_destination(stored: Mapping[str, Any]) -> dict[str, Any]:
+    """What history may show of a stored destination. The account number
+    stays encrypted; the app shows an account by its last four digits."""
+    if stored.get("kind") == "account":
+        return {
+            "kind": "account",
+            "name": stored.get("name"),
+            "account_last4": stored.get("account_last4"),
+            "bank_id": stored.get("bank_id"),
+        }
+    return {
+        "kind": "shap_id",
+        "shap_id": stored.get("shap_id"),
+        "shap_name": stored.get("shap_name"),
+        "bank_id": stored.get("bank_id"),
+    }
+
+
 def _is_unique_violation(exc: IntegrityError, constraint: str) -> bool:
     return isinstance(exc.orig, UniqueViolation) and exc.orig.diag.constraint_name == constraint
 
@@ -180,6 +228,7 @@ class DepositService:
         fee_cents: Cents,
         min_voucher_cents: Cents,
         token_ttl: timedelta,
+        pii: PiiCipher | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.switch = switch
@@ -187,6 +236,7 @@ class DepositService:
         self.fee_cents = fee_cents
         self.min_voucher_cents = min_voucher_cents
         self.token_ttl = token_ttl
+        self.pii = pii
         self.now = now
 
     # --- rules -------------------------------------------------------------
@@ -228,20 +278,37 @@ class DepositService:
         voucher_token: str,
         destination: Mapping[str, Any],
         idempotency_key: str,
+        user_id: uuid.UUID,
     ) -> tuple[DepositView, bool]:
-        """Returns the deposit and whether it was created (False: a replay)."""
-        stored_destination = self._resolve_destination(destination)
+        """Returns the deposit and whether it was created (False: a replay).
+        `destination` is resolved here (the older request shape); a saved
+        payout method arrives already resolved, through `create_deposit_to`."""
+        stored_destination = self._resolve_destination(destination, demo_directory(session))
+        session.rollback()  # the lookup's read; the deposit gets its own transaction
+        return self.create_deposit_to(
+            session, voucher_token, stored_destination, idempotency_key, user_id
+        )
+
+    def create_deposit_to(
+        self,
+        session: Session,
+        voucher_token: str,
+        stored_destination: dict[str, Any],
+        idempotency_key: str,
+        user_id: uuid.UUID,
+    ) -> tuple[DepositView, bool]:
+        """Charge and record a deposit to an already-resolved destination."""
         try:
             deposit = self._charge_and_record(
-                session, voucher_token, stored_destination, idempotency_key
+                session, voucher_token, stored_destination, idempotency_key, user_id
             )
             session.commit()
         except _Replay:
-            return self._replay(session, idempotency_key), False
+            return self._replay(session, idempotency_key, user_id), False
         except IntegrityError as exc:
             if not _is_unique_violation(exc, "uq_deposits_idempotency_key"):
                 raise
-            return self._replay(session, idempotency_key), False
+            return self._replay(session, idempotency_key, user_id), False
         except Refused:
             session.rollback()
             raise
@@ -249,7 +316,7 @@ class DepositService:
         self._instruct_payout(session, deposit.id)
         return DepositView.of(self._load(session, deposit.id)), True
 
-    def _replay(self, session: Session, idempotency_key: str) -> DepositView:
+    def _replay(self, session: Session, idempotency_key: str, user_id: uuid.UUID) -> DepositView:
         session.rollback()
         existing = session.scalar(
             select(Deposit)
@@ -258,6 +325,9 @@ class DepositService:
         )
         if existing is None:
             raise Refused("voucher_already_redeemed")
+        if existing.user_id != user_id:
+            session.rollback()
+            raise Refused("deposit_not_found")
         return DepositView.of(existing)
 
     def _charge_and_record(
@@ -266,6 +336,7 @@ class DepositService:
         voucher_token: str,
         destination: dict[str, Any],
         idempotency_key: str,
+        user_id: uuid.UUID,
     ) -> Deposit:
         lock_float(session)
 
@@ -305,6 +376,7 @@ class DepositService:
             payout_cents=charged.amount_cents - self.fee_cents,
             destination=destination,
             idempotency_key=idempotency_key,
+            user_id=user_id,
         )
         transition(deposit, S.CHARGED)
         post(
@@ -329,6 +401,7 @@ class DepositService:
         payout_cents: Cents,
         destination: dict[str, Any],
         idempotency_key: str,
+        user_id: uuid.UUID,
     ) -> Deposit:
         """Insert as `pending`. A reference collision retries with a fresh one
         inside a savepoint; any other violation (the idempotency key) propagates."""
@@ -342,6 +415,7 @@ class DepositService:
                 destination=destination,
                 status=S.PENDING,
                 idempotency_key=idempotency_key,
+                user_id=user_id,
             )
             try:
                 with session.begin_nested():
@@ -353,7 +427,9 @@ class DepositService:
             return deposit
         raise RuntimeError(f"no unique reference after {MAX_REFERENCE_ATTEMPTS} attempts")
 
-    def _resolve_destination(self, destination: Mapping[str, Any]) -> dict[str, Any]:
+    def _resolve_destination(
+        self, destination: Mapping[str, Any], directory: Directory
+    ) -> dict[str, Any]:
         """Validate and resolve before anything is charged. Returns what is stored."""
         kind = destination.get("kind")
         if kind == "shap_id":
@@ -361,12 +437,20 @@ class DepositService:
             if not isinstance(shap_id, str):
                 raise Refused("shapid_invalid_format")
             try:
-                resolved = resolve(shap_id)
+                resolved = resolve(shap_id, directory)
             except ShapIdError as exc:
                 raise Refused(exc.reason) from None
-            return {"kind": "shap_id", "shap_id": shap_id, "bank_id": resolved.bank_id}
+            # shap_name is the scheme's masked display text, kept for history.
+            return {
+                "kind": "shap_id",
+                "shap_id": shap_id,
+                "shap_name": resolved.shap_name,
+                "bank_id": resolved.bank_id,
+            }
         if kind == "account":
-            # POPIA: see Deposit.destination. Nothing constructs this kind today.
+            # POPIA: the number is stored encrypted, never in plaintext (app/pii.py).
+            if self.pii is None:
+                raise Refused("invalid_destination")
             name = destination.get("name")
             number = destination.get("account_number")
             bank = BANK_IDS_BY_API_CODE.get(str(destination.get("bank")))
@@ -378,10 +462,32 @@ class DepositService:
                 or bank is None
             ):
                 raise Refused("invalid_destination")
-            return {"kind": "account", "name": name, "account_number": number, "bank_id": bank}
+            sealed = self.pii.encrypt(number, ACCOUNT_NUMBER)
+            return {
+                "kind": "account",
+                "name": name,
+                "bank_id": bank,
+                "account_last4": number[-4:],
+                "account_number_encrypted": base64.b64encode(sealed).decode(),
+            }
         raise Refused("invalid_destination")
 
     # --- payout ------------------------------------------------------------
+
+    def _payout_destination(self, stored: Mapping[str, Any]) -> dict[str, Any]:
+        """The destination as the payout provider needs it: an account number
+        decrypted here, in memory, for this one call."""
+        if stored.get("kind") != "account":
+            return dict(stored)
+        if self.pii is None:
+            raise PayoutUnavailable("PII_KEY is not set: cannot decrypt the account number")
+        sealed = base64.b64decode(stored["account_number_encrypted"])
+        return {
+            "kind": "account",
+            "name": stored["name"],
+            "bank_id": stored["bank_id"],
+            "account_number": self.pii.decrypt(sealed, ACCOUNT_NUMBER),
+        }
 
     def _lock(self, session: Session, deposit_id: uuid.UUID) -> Deposit | None:
         return session.scalar(
@@ -408,7 +514,9 @@ class DepositService:
             return
         try:
             ref = self.provider.create(
-                deposit.payout_cents, deposit.destination, idempotency_key=str(deposit.id)
+                deposit.payout_cents,
+                self._payout_destination(deposit.destination),
+                idempotency_key=str(deposit.id),
             )
         except PayoutUnavailable:
             session.rollback()
@@ -478,8 +586,13 @@ class DepositService:
 
     # --- status ------------------------------------------------------------
 
-    def get_deposit(self, session: Session, deposit_id: uuid.UUID) -> DepositView:
+    def get_deposit(
+        self, session: Session, deposit_id: uuid.UUID, user_id: uuid.UUID
+    ) -> DepositView:
         deposit = self._load(session, deposit_id)
+        if deposit.user_id != user_id:
+            session.rollback()
+            raise Refused("deposit_not_found")
         if deposit.status is S.CHARGED:
             session.rollback()
             self._instruct_payout(session, deposit_id)
@@ -491,3 +604,32 @@ class DepositService:
         view = DepositView.of(deposit)
         session.rollback()  # end the read transaction; never leave it idle
         return view
+
+    # --- history -----------------------------------------------------------
+
+    def list_deposits(
+        self, session: Session, user_id: uuid.UUID, limit: int
+    ) -> list[DepositRecordView]:
+        """The user's most recent deposits, newest first. Read-only."""
+        rows = session.scalars(
+            select(Deposit)
+            .where(Deposit.user_id == user_id)
+            .order_by(Deposit.created_at.desc(), Deposit.id)
+            .limit(limit)
+        ).all()
+        records = [
+            DepositRecordView(
+                id=d.id,
+                reference=d.reference,
+                status=APP_STATUS[d.status],
+                payout_cents=d.payout_cents,
+                value_cents=d.amount_cents,
+                fee_cents=d.fee_cents,
+                failure_reason=d.failure_reason,
+                created_at=d.created_at,
+                destination=public_destination(d.destination),
+            )
+            for d in rows
+        ]
+        session.rollback()  # end the read transaction; never leave it idle
+        return records
