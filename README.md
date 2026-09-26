@@ -121,7 +121,7 @@ scenarios match the app's own fake (see its `TESTING.md`).
 
 | Call | Does |
 |---|---|
-| `POST /demo/vouchers` `{"amount_cents": 50000}` | vends a voucher, as the spaza's till would |
+| `POST /demo/vouchers` `{"amount_cents": 50000}` | vends a voucher, as the spaza's till would. The response includes `qr_payload` (`kasideposit://redeem?pin=<16 digits>`, the format the app's scanner reads) and `qr_svg`, the QR for the slip. |
 | `GET /demo/vouchers` | the 50 most recent vouchers, PINs masked |
 | `GET /demo/float` | the float: settlement balance, and what is still free to pay out |
 | `POST /demo/float` `{"amount_cents": 1000000}` | tops up the float from capital (up to R1 000 000 at a time) |
@@ -223,8 +223,10 @@ computer, and needs no technical knowledge:
    `DEMO_API_KEY`. The browser remembers it, so the cashier doesn't see it again.
 2. **Selling:** take the cash, tap **R50, R100, R200, R500 or R1 000** (or type
    another amount in rand), then confirm.
-3. **The slip:** shows the **PIN** in large grouped digits, with the amount,
-   serial and time. **Print** sends just the slip to a printer.
+3. **The slip:** shows the **PIN** in large grouped digits and a **QR code**,
+   with the amount, serial and time. **Print** sends just the slip to a printer.
+   In the mobile app, the customer either scans the QR or types the PIN. Both
+   lead to the same confirm screen before any money moves.
 4. **Manager:** shows the float available to pay out, and tops it up.
 
 The page holds no secret. Everything it does is a `/demo` request carrying the

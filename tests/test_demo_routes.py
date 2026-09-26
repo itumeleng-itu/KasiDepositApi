@@ -21,7 +21,9 @@ def test_vend_returns_201_with_documented_shape(client: TestClient) -> None:
     _assert_demo_header(response.headers)
 
     body = response.json()
-    assert set(body) == {"pin", "serial", "amount_cents", "amount_display", "issued_at"}
+    assert set(body) == {
+        "pin", "serial", "amount_cents", "amount_display", "issued_at", "qr_payload", "qr_svg"
+    }
     assert isinstance(body["pin"], str) and len(body["pin"]) == 16 and body["pin"].isdigit()
     assert isinstance(body["serial"], str) and len(body["serial"]) == 20
     assert body["amount_cents"] == 50000
