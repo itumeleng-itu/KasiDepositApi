@@ -11,15 +11,23 @@ number listed there resolves to its name and bank, so a presenter's own
 number shows their own name. With an @bank suffix for a different bank, it is
 not found there.
 
-Any other number falls back to the scripted scenarios, which match the mobile
-app's fake (src/api/fake.ts in the app, and its TESTING.md), keyed off the
-number's last digit:
+Then the RESERVED TEST NUMBERS, so a presenter can show each failure on
+purpose (the same numbers as the mobile app's fake, src/api/fake.ts, and its
+TESTING.md):
 
-    9     shapid_not_found
-    8     shapid_suspended
-    7     shapid_ambiguous, unless an @bank suffix is present: then it
-          resolves at that bank
-    else  "M. Mothiba" at Capitec
+    082 000 0009  shapid_not_found (not set up for PayShap)
+    082 000 0008  shapid_suspended
+    082 000 0007  shapid_ambiguous, unless an @bank suffix is present: then it
+                  resolves at that bank
+    082 000 0005  registered to someone else (MASKED_NAME), so adding it is
+                  refused as shapid_name_mismatch
+
+EVERY OTHER valid number is registered for PayShap, to whoever is asking
+(`owner_names`, the user adding it) under their masked name, so a real
+person's own number is accepted and a demo never fails by accident. Without
+an owner (the public GET /v1/shapid) it shows MASKED_NAME. It is at the @bank
+suffix's bank, or Capitec. With no real PayShap connection there is nothing
+truer to say: the demo cannot know which numbers are really registered.
 
 A ShapID that is not the canonical form the app sends (`+27`, then a mobile
 number starting 6, 7 or 8, optionally `@<bank>`) is shapid_invalid_format.
@@ -33,6 +41,7 @@ from sqlalchemy.orm import Session
 
 from app.banks import BankId, parse_bank_id
 from app.models import DemoShapId
+from app.schemas.demo_shapid import mask_name
 
 _SHAP_ID = re.compile(r"^(?P<number>\+27[678]\d{8})(?:@(?P<bank>[A-Za-z_]+))?$")
 
@@ -90,7 +99,25 @@ def demo_directory(session: Session) -> Directory:
     return lookup
 
 
-def resolve(shap_id: str, directory: Directory | None = None) -> ResolvedShapId:
+def _masked_or_default(owner_names: str | None) -> str:
+    if owner_names:
+        try:
+            return mask_name(owner_names)
+        except ValueError:
+            pass  # not a first name and surname: the name check will refuse it
+    return MASKED_NAME
+
+
+# The reserved test numbers (E.164, no suffix). See the module docstring.
+NOT_REGISTERED = "+27820000009"
+SUSPENDED = "+27820000008"
+AMBIGUOUS = "+27820000007"
+SOMEONE_ELSES = "+27820000005"
+
+
+def resolve(
+    shap_id: str, directory: Directory | None = None, owner_names: str | None = None
+) -> ResolvedShapId:
     """Resolve a ShapID or raise the ShapIdError for its scenario."""
     match = _SHAP_ID.fullmatch(shap_id)
     if match is None:
@@ -109,14 +136,13 @@ def resolve(shap_id: str, directory: Directory | None = None) -> ResolvedShapId:
             raise ShapIdNotFound(shap_id)
         return ResolvedShapId(shap_id=shap_id, shap_name=shap_name, bank_id=bank)
 
-    last_digit = match["number"][-1]
-    if last_digit == "9":
+    number = match["number"]
+    if number == NOT_REGISTERED:
         raise ShapIdNotFound(shap_id)
-    if last_digit == "8":
+    if number == SUSPENDED:
         raise ShapIdSuspended(shap_id)
-    if last_digit == "7":
-        if suffix is None:
-            raise ShapIdAmbiguous(shap_id)
-        return ResolvedShapId(shap_id=shap_id, shap_name=MASKED_NAME, bank_id=suffix)
-    return ResolvedShapId(shap_id=shap_id, shap_name=MASKED_NAME, bank_id=DEFAULT_BANK)
+    if number == AMBIGUOUS and suffix is None:
+        raise ShapIdAmbiguous(shap_id)
+    shap_name = MASKED_NAME if number == SOMEONE_ELSES else _masked_or_default(owner_names)
+    return ResolvedShapId(shap_id=shap_id, shap_name=shap_name, bank_id=suffix or DEFAULT_BANK)
 

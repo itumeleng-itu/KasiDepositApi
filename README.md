@@ -139,16 +139,16 @@ reversal API, and may not expose one.
 
 | To show | Do |
 |---|---|
-| A normal deposit | Any voucher, any ShapID not listed below |
+| A normal deposit | Any voucher, to a saved payout method |
 | `bank_processing_error` | A R405 voucher (payout R400.00) |
 | `limit_exceeded` | A R406 voucher (payout R401.00) |
 | `bank_unavailable` | A R407 voucher (payout R402.00) |
 | `insufficient_float` | `seed.py --reset --yes` then no `--fund`, or a small `--fund` |
-| ShapID not found / suspended / ambiguous | A number ending in 9 / 8 / 7 (7 resolves with `@bank`) |
+| PayShap: a user's own number | Any valid number not listed below counts as set up for PayShap, in the name of whoever adds it, so a real user's own number is accepted and a demo never fails by accident. Nothing here registers anyone for PayShap: that only happens in the user's banking app. With no bank connection, the demo cannot know which numbers really are. |
+| PayShap failures, on purpose | `082 000 0009` not set up for PayShap / `082 000 0008` suspended / `082 000 0007` at several banks (resolves once a bank is chosen) / `082 000 0005` someone else's (`shapid_name_mismatch`) |
 | Register | ID `8001015009087` (or any valid adult ID not below) |
 | `id_verification_failed` / `id_number_already_registered` | ID `8001010000081` / `8001010001089` (the identity mock keys off the sequence digits) |
-| A presenter's own PayShap number | List it on the till page's manager screen, **PayShap numbers (demo)**, with their name and bank. It then resolves to their masked name ("T. Mokoena") and adds cleanly; anyone else adding it gets `shapid_name_mismatch` |
-| `shapid_name_mismatch` | Add any unlisted number ending 0-6: it resolves to "M. Mothiba" |
+| A presenter's own PayShap number, and `shapid_name_mismatch` | List it on the till page's manager screen, **PayShap numbers (demo)**, with their name and bank. It then resolves to their masked name ("T. Mokoena") and adds cleanly; anyone else adding it gets `shapid_name_mismatch` |
 | `account_not_found` / `account_holder_mismatch` | An account number ending in 9 / 8 |
 
 The mock payout moves to `submitted` after about 1.5s and settles after 3s.

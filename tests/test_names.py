@@ -44,3 +44,17 @@ def test_the_demo_directory_masks_names_and_normalises_numbers() -> None:
         normalise_number("021 555 1234")  # a landline
     with pytest.raises(ValueError):
         mask_name("Thabo")
+
+
+@pytest.mark.parametrize(
+    ("full_names", "masked"),
+    [
+        ("Thabo Mokoena", "T. Mokoena"),
+        ("thabo Sipho Mokoena", "T. Mokoena"),
+        ("Lerato O'Neill-Botha", "L. O'Neill-Botha"),
+    ],
+)
+def test_a_masked_name_matches_its_owner(full_names: str, masked: str) -> None:
+    # The demo directory registers a new user's number under mask_name(their names).
+    assert mask_name(full_names) == masked
+    assert masked_name_matches(mask_name(full_names), full_names)
