@@ -14,11 +14,12 @@ It advances on a clock, so the app's polling has something real to poll:
     completed  (or failed, for the trigger amounts below)
 
 Failure triggers, by payout amount, so any outcome can be shown on stage
-without touching config:
+without touching config. They are the payouts of R405, R406 and R407 vouchers
+after our 2.5% fee (FEE_BASIS_POINTS=250); a different fee moves them:
 
-    R400.00 exactly   failed, bank_processing_error
-    R401.00 exactly   failed, limit_exceeded
-    R402.00 exactly   failed, bank_unavailable
+    R394.87 exactly   failed, bank_processing_error   (a R405 voucher)
+    R395.85 exactly   failed, limit_exceeded          (a R406 voucher)
+    R396.82 exactly   failed, bank_unavailable        (a R407 voucher)
     anything else     completed (whole rand and cents alike)
 
 `insufficient_float` is not a provider outcome: we check our own float before
@@ -47,9 +48,9 @@ SUBMITTED_AFTER_SECONDS = 1.5
 COMPLETED_AFTER_SECONDS = 3.0
 
 FAILURE_TRIGGERS: dict[Cents, str] = {
-    40000: "bank_processing_error",
-    40100: "limit_exceeded",
-    40200: "bank_unavailable",
+    39487: "bank_processing_error",
+    39585: "limit_exceeded",
+    39682: "bank_unavailable",
 }
 
 _REF_PREFIX = "mockpo"

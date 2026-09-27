@@ -91,7 +91,7 @@ from app.models import (
     VoucherStatus,
     VoucherToken,
 )
-from app.money import Cents
+from app.money import Cents, percent_of
 from app.payouts import PayoutProvider, PayoutRef, PayoutUnavailable
 from app.pii import ACCOUNT_NUMBER, PiiCipher
 from app.shapid import Directory, ShapIdError, demo_directory, resolve
@@ -225,7 +225,7 @@ class DepositService:
         self,
         switch: VoucherSwitch,
         provider: PayoutProvider,
-        fee_cents: Cents,
+        fee_basis_points: int,
         min_voucher_cents: Cents,
         token_ttl: timedelta,
         pii: PiiCipher | None = None,
@@ -233,7 +233,7 @@ class DepositService:
     ) -> None:
         self.switch = switch
         self.provider = provider
-        self.fee_cents = fee_cents
+        self.fee_basis_points = fee_basis_points
         self.min_voucher_cents = min_voucher_cents
         self.token_ttl = token_ttl
         self.pii = pii
@@ -241,11 +241,15 @@ class DepositService:
 
     # --- rules -------------------------------------------------------------
 
+    def fee_for(self, amount_cents: Cents) -> Cents:
+        """Our fee on a voucher: FEE_BASIS_POINTS of its amount, to the nearest cent."""
+        return percent_of(amount_cents, self.fee_basis_points)
+
     def is_too_small(self, amount_cents: Cents) -> bool:
         """Below the minimum, or nothing left after the fee. Unreachable while
-        vending enforces MIN_VOUCHER_CENTS above the fee; kept so a change to
-        either surfaces it rather than paying out nothing."""
-        return amount_cents < self.min_voucher_cents or amount_cents <= self.fee_cents
+        vending enforces MIN_VOUCHER_CENTS and the fee is under 100%; kept so a
+        change to either surfaces it rather than paying out nothing."""
+        return amount_cents < self.min_voucher_cents or amount_cents <= self.fee_for(amount_cents)
 
     # --- lookup ------------------------------------------------------------
 
@@ -266,8 +270,8 @@ class DepositService:
         return VoucherLookup(
             voucher_token=token,
             value_cents=info.amount_cents,
-            fee_cents=self.fee_cents,
-            payout_cents=max(info.amount_cents - self.fee_cents, 0),
+            fee_cents=self.fee_for(info.amount_cents),
+            payout_cents=max(info.amount_cents - self.fee_for(info.amount_cents), 0),
         )
 
     # --- create ------------------------------------------------------------
@@ -358,7 +362,7 @@ class DepositService:
             raise _Replay()
         if self.is_too_small(info.amount_cents):
             raise Refused("voucher_too_small")
-        payout_cents = info.amount_cents - self.fee_cents
+        payout_cents = info.amount_cents - self.fee_for(info.amount_cents)
         try:
             check_float(session, payout_cents)
         except InsufficientFloat as exc:
@@ -373,7 +377,7 @@ class DepositService:
             session,
             voucher_pin=charged.pin,
             amount_cents=charged.amount_cents,
-            payout_cents=charged.amount_cents - self.fee_cents,
+            payout_cents=charged.amount_cents - self.fee_for(charged.amount_cents),
             destination=destination,
             idempotency_key=idempotency_key,
             user_id=user_id,
@@ -410,7 +414,7 @@ class DepositService:
                 reference=new_reference(),
                 voucher_pin=voucher_pin,
                 amount_cents=amount_cents,
-                fee_cents=self.fee_cents,
+                fee_cents=amount_cents - payout_cents,
                 payout_cents=payout_cents,
                 destination=destination,
                 status=S.PENDING,

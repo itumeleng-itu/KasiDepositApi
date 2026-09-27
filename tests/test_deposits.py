@@ -110,7 +110,7 @@ def test_two_simultaneous_requests_with_one_key_make_one_deposit(clean_db: Engin
     service = DepositService(
         switch=switch,
         provider=MockPayoutProvider(),
-        fee_cents=500,
+        fee_basis_points=250,
         min_voucher_cents=1000,
         token_ttl=timedelta(minutes=10),
     )

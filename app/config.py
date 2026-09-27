@@ -71,8 +71,9 @@ class Settings(BaseSettings):
     enable_demo_routes: bool | None = None
     min_voucher_cents: int = Field(default=1000, gt=0)
     max_voucher_cents: int = Field(default=500000, gt=0)
-    # Our fee per deposit, deducted from the voucher amount.
-    fee_cents: int = Field(default=500, ge=0)
+    # Our fee per deposit, in basis points (hundredths of a percent) of the
+    # voucher amount, deducted from it: 250 is 2.5%. See money.percent_of.
+    fee_basis_points: int = Field(default=250, ge=0, lt=10_000)
     # How long a voucher lookup's token may be used to create a deposit.
     voucher_token_ttl_seconds: int = Field(default=600, gt=0)
     # Secret that /demo requests must present in the X-Demo-Key header. Required

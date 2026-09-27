@@ -3,7 +3,7 @@
     vend (the till, /demo) -> look up (the app, /v1) -> deposit -> poll -> settled
 
 and then the money: the ledger balances, the voucher is redeemed, the float
-paid her R495, we earned R5, and the issuer owes us the full R500.
+paid her R487.50, we earned R12.50 (2.5%), and the issuer owes us the full R500.
 """
 
 import uuid
@@ -62,8 +62,8 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
     assert lookup.status_code == 200
     assert (lookup.json()["value_cents"], lookup.json()["fee_cents"], lookup.json()["payout_cents"]) == (
         50000,
-        500,
-        49500,
+        1250,
+        48750,
     )
 
     # She confirms the ShapID, then sends.
@@ -79,7 +79,7 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
     )
     assert created.status_code == 201
     deposit = created.json()
-    assert deposit["payout_cents"] == 49500
+    assert deposit["payout_cents"] == 48750
     assert deposit["reference"].startswith("KD-")
 
     # The app polls until the payout lands.
@@ -92,7 +92,7 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
         "id": deposit["id"],
         "reference": deposit["reference"],
         "status": "completed",
-        "payout_cents": 49500,
+        "payout_cents": 48750,
         "failure_reason": None,
     }
 
@@ -101,9 +101,9 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
         assert_ledger_balanced(session)
         voucher = session.get(Voucher, pin)
         assert voucher is not None and voucher.status is VoucherStatus.REDEEMED
-        assert balance_of(session, LedgerAccount.SETTLEMENT) == FLOAT - 49500  # R495 left the float
+        assert balance_of(session, LedgerAccount.SETTLEMENT) == FLOAT - 48750  # R487.50 left the float
         assert balance_of(session, LedgerAccount.USER_PAYABLE) == 0  # we owe her nothing
-        assert balance_of(session, LedgerAccount.FEE_INCOME) == -500  # we earned R5
+        assert balance_of(session, LedgerAccount.FEE_INCOME) == -1250  # we earned R12.50
         assert balance_of(session, LedgerAccount.VOUCHER_RECEIVABLE) == 50000  # the issuer owes us R500
 
     # And the PIN cannot be spent twice.

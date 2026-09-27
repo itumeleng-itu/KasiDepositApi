@@ -6,8 +6,8 @@ A person hands R500 cash to a spaza shop and receives a voucher PIN. That cash
 is now the shop's, and reaches the voucher issuer through the issuer's own
 settlement cycle, not through us.
 
-When she redeems the PIN with us, we owe her R495 (R500 less our R5 fee)
-immediately, but the issuer has not paid us yet. So the R495 goes out of a
+When she redeems the PIN with us, we owe her R487.50 (R500 less our 2.5%
+fee, R12.50) immediately, but the issuer has not paid us yet. So the R487.50 goes out of a
 prefunded settlement account that we control at our sponsor bank (our
 "float"), and the issuer reimburses us later.
 
@@ -27,7 +27,7 @@ Accounts
 - `voucher_receivable`: what the issuer owes us for vouchers we have charged.
 - `user_payable`: what we owe users between charging a voucher and the
   payout settling.
-- `fee_income`: our fee per deposit.
+- `fee_income`: our fee per deposit, 2.5% of the voucher (FEE_BASIS_POINTS).
 - `capital`: the owners' money that funds the float. Funding posts
   `settlement +X, capital -X`; it is the only movement with no deposit.
 
@@ -39,10 +39,10 @@ Debits are positive, credits are negative. So asset accounts (`settlement`,
 successful R500 deposit:
 
     On charge:           voucher_receivable  +50000   the issuer owes us R500
-                         user_payable        -49500   we owe her R495
-                         fee_income            -500   we earned R5
-    On payout settling:  user_payable        +49500   we no longer owe her
-                         settlement          -49500   the money left our float
+                         user_payable        -48750   we owe her R487.50
+                         fee_income           -1250   we earned R12.50
+    On payout settling:  user_payable        +48750   we no longer owe her
+                         settlement          -48750   the money left our float
 
 Rules
 -----

@@ -9,8 +9,8 @@ A person hands R500 cash to a spaza shop and receives a voucher PIN. That
 cash is now the **shop's**, and reaches the voucher issuer through the
 issuer's own settlement cycle, not through us.
 
-When she redeems the PIN with us, we owe her R495 (R500 less our R5 fee)
-**immediately**, but the issuer has not paid us yet. So the R495 goes out of
+When she redeems the PIN with us, we owe her R487.50 (R500 less our 2.5% fee,
+R12.50) **immediately**, but the issuer has not paid us yet. So the R487.50 goes out of
 a **prefunded settlement account** we control at our sponsor bank (our
 float), and the issuer reimburses us later.
 
@@ -29,10 +29,10 @@ A successful R500 deposit, in the ledger (debits positive, credits negative):
 | When | Account | Amount | Meaning |
 |---|---|---|---|
 | Charged | `voucher_receivable` | +R500 | the issuer owes us R500 |
-| | `user_payable` | −R495 | we owe her R495 |
-| | `fee_income` | −R5 | we earned R5 |
-| Payout settled | `user_payable` | +R495 | we no longer owe her |
-| | `settlement` | −R495 | the money left our float |
+| | `user_payable` | −R487.50 | we owe her R487.50 |
+| | `fee_income` | −R12.50 | we earned R12.50 (2.5%) |
+| Payout settled | `user_payable` | +R487.50 | we no longer owe her |
+| | `settlement` | −R487.50 | the money left our float |
 
 The float is topped up from `capital` (`python seed.py --fund 10000`).
 
@@ -144,9 +144,9 @@ reversal API, and may not expose one.
 | To show | Do |
 |---|---|
 | A normal deposit | Any voucher, to a saved payout method |
-| `bank_processing_error` | A R405 voucher (payout R400.00) |
-| `limit_exceeded` | A R406 voucher (payout R401.00) |
-| `bank_unavailable` | A R407 voucher (payout R402.00) |
+| `bank_processing_error` | A R405 voucher (payout R394.87) |
+| `limit_exceeded` | A R406 voucher (payout R395.85) |
+| `bank_unavailable` | A R407 voucher (payout R396.82) |
 | `insufficient_float` | `seed.py --reset --yes` then no `--fund`, or a small `--fund` |
 | PayShap: a user's own number | Any valid number not listed below counts as set up for PayShap, in the name of whoever adds it, so a real user's own number is accepted and a demo never fails by accident. Nothing here registers anyone for PayShap: that only happens in the user's banking app. With no bank connection, the demo cannot know which numbers really are. |
 | PayShap failures, on purpose | `082 000 0009` not set up for PayShap / `082 000 0008` suspended / `082 000 0007` at several banks (resolves once a bank is chosen) / `082 000 0005` someone else's (`shapid_name_mismatch`) |
