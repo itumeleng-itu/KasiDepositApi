@@ -165,11 +165,11 @@ def test_lookup_of_a_redeemed_voucher(api: TestClient, clean_db: Engine) -> None
     ("shap_id", "expected_status", "expected_body"),
     [
         ("+27821234560", 200, {"shap_name": "M. Mothiba", "bank": "CAPITEC"}),
-        ("+27821234569", 404, {"reason": "shapid_not_found"}),
-        ("+27821234568", 409, {"reason": "shapid_suspended"}),
-        ("+27821234567", 409, {"reason": "shapid_ambiguous"}),
-        ("+27821234567@fnb", 200, {"shap_name": "M. Mothiba", "bank": "FNB"}),
-        ("+27821234567@standard_bank", 200, {"shap_name": "M. Mothiba", "bank": "STANDARD_BANK"}),
+        ("+27820000009", 404, {"reason": "shapid_not_found"}),
+        ("+27820000008", 409, {"reason": "shapid_suspended"}),
+        ("+27820000007", 409, {"reason": "shapid_ambiguous"}),
+        ("+27820000007@fnb", 200, {"shap_name": "M. Mothiba", "bank": "FNB"}),
+        ("+27821234560@standard_bank", 200, {"shap_name": "M. Mothiba", "bank": "STANDARD_BANK"}),
         ("0821234560", 422, {"reason": "shapid_invalid_format"}),
         ("+27821234567@notabank", 422, {"reason": "shapid_invalid_format"}),
     ],
@@ -278,7 +278,7 @@ def test_a_shapid_failure_at_deposit_charges_nothing(api: TestClient, clean_db: 
     _fund(clean_db)
     pin = _vend(clean_db)
     token = _lookup(api, pin)
-    response = _deposit(api, token, destination={"kind": "shap_id", "shap_id": "+27821234569"})
+    response = _deposit(api, token, destination={"kind": "shap_id", "shap_id": "+27820000009"})
     assert (response.status_code, response.json()) == (404, {"reason": "shapid_not_found"})
     assert _voucher_status(clean_db, pin) is VoucherStatus.ACTIVE
     assert _deposit(api, token).status_code == 201  # the token was not used up

@@ -67,7 +67,8 @@ def test_the_directory_resolves_a_listed_number_to_its_person(api: TestClient) -
         {"number": PRESENTER, "shap_name": "T. Mokoena", "bank": "FNB"}
     ]
     assert api.delete("/demo/shapids/0825551234").status_code == 204
-    # Unlisted again: back to the scripted scenario for its last digit.
+    # Unlisted again: any number counts as registered, shown as M. Mothiba when nobody signed
+    # in is asking.
     assert api.get("/v1/shapid/%2B27825551234").json()["shap_name"] == "M. Mothiba"
 
 
@@ -91,13 +92,21 @@ def test_the_users_own_number_is_added_and_becomes_the_default(api: TestClient) 
     assert (again.status_code, again.json()["id"]) == (200, response.json()["id"])
 
 
+def test_a_new_users_unlisted_number_is_added_in_their_own_name_when_registered(api: TestClient) -> None:
+    # Any unlisted number is registered to the person adding it, so a real user's own number
+    # is accepted rather than refused as someone else's.
+    response = _add(api, kind="shap_id", shap_id="+27821234560")
+    assert response.status_code == 201, response.text
+    assert (response.json()["shap_name"], response.json()["bank"]) == ("T. Mokoena", "CAPITEC")
+
+
 @pytest.mark.parametrize(
     ("shap_id", "status", "reason"),
     [
-        ("+27821234560", 409, "shapid_name_mismatch"),  # resolves to M. Mothiba: not this user
-        ("+27821234569", 404, "shapid_not_found"),  # not registered for PayShap
-        ("+27821234568", 409, "shapid_suspended"),
-        ("+27821234567", 409, "shapid_ambiguous"),
+        ("+27820000005", 409, "shapid_name_mismatch"),  # reserved: registered to someone else
+        ("+27820000009", 404, "shapid_not_found"),  # reserved: not set up for PayShap
+        ("+27820000008", 409, "shapid_suspended"),
+        ("+27820000007", 409, "shapid_ambiguous"),
         ("0825551234", 422, "shapid_invalid_format"),
     ],
 )

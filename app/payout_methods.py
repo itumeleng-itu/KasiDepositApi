@@ -101,12 +101,12 @@ class PayoutMethodService:
     def add_shap_id(
         self, session: Session, user_id: uuid.UUID, shap_id: str, make_default: bool
     ) -> PayoutMethodView:
+        user = self._user(session, user_id)
         try:
-            resolved = resolve(shap_id, demo_directory(session))
+            resolved = resolve(shap_id, demo_directory(session), owner_names=user.full_names)
         except ShapIdError as exc:
             session.rollback()
             raise Refused(exc.reason) from None
-        user = self._user(session, user_id)
         if not masked_name_matches(resolved.shap_name, user.full_names):
             session.rollback()
             raise Refused("shapid_name_mismatch")
