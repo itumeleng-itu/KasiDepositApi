@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.ledger import fund_float
 from app.main import create_app
-from app.models import Deposit, PayoutMethod
+from app.models import Deposit, PayoutMethod, User
 from app.payouts import MockPayoutProvider, PayoutRef, ProviderStatus
 from app.pii import ACCOUNT_NUMBER, PiiCipher
 from app.switch import VoucherSwitch
@@ -183,6 +183,42 @@ def test_default_switching_and_removal(api: TestClient) -> None:
 
     missing = api.delete(f"{METHODS}/{uuid.uuid4()}")
     assert (missing.status_code, missing.json()) == (404, {"reason": "payout_method_not_found"})
+
+
+def _users_shap_id(clean_db: Engine) -> str | None:
+    with Session(clean_db) as session:
+        return session.scalars(select(User.shap_id).where(User.full_names == "Thabo Mokoena")).one()
+
+
+def test_the_user_row_carries_their_current_payshap_number(api: TestClient, clean_db: Engine) -> None:
+    assert _users_shap_id(clean_db) is None  # registered, nothing added yet
+
+    first = _add(api, kind="shap_id", shap_id="+27821234560").json()
+    assert _users_shap_id(clean_db) == "+27821234560"
+
+    # A bank account is not a PayShap number: the copy is left alone.
+    account = _add(api, kind="account", bank="FNB", account_number=ACCOUNT).json()
+    assert _users_shap_id(clean_db) == "+27821234560"
+
+    second = _add(api, kind="shap_id", shap_id=PRESENTER).json()
+    assert _users_shap_id(clean_db) == PRESENTER
+
+    # Choosing a PayShap number as the default makes it the one on the user row.
+    api.post(f"{METHODS}/{first['id']}/default")
+    assert _users_shap_id(clean_db) == "+27821234560"
+    api.post(f"{METHODS}/{account['id']}/default")
+    assert _users_shap_id(clean_db) == "+27821234560"
+
+    # Removing it moves the copy to the newest PayShap number left, then clears it.
+    api.delete(f"{METHODS}/{first['id']}")
+    assert _users_shap_id(clean_db) == PRESENTER
+    api.delete(f"{METHODS}/{second['id']}")
+    assert _users_shap_id(clean_db) is None
+
+
+def test_a_refused_number_never_reaches_the_user_row(api: TestClient, clean_db: Engine) -> None:
+    assert _add(api, kind="shap_id", shap_id="+27820000009").status_code == 404
+    assert _users_shap_id(clean_db) is None
 
 
 def test_at_most_five_methods(api: TestClient) -> None:

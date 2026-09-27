@@ -19,6 +19,10 @@ into" line in the app) whenever there is at least one: the first one added
 becomes it, and removing the default promotes the newest remaining. Adding a
 method that is already saved returns it rather than a duplicate.
 
+The user's current PayShap number is also copied onto `users.shap_id`: set
+when one is added or chosen as the default, and moved to their newest
+remaining PayShap number (or cleared) when it is removed.
+
 A deposit sends `payout_method_id`; `destination_for_deposit` turns it into
 the snapshot stored on the deposit, so later edits never rewrite history.
 """
@@ -111,6 +115,7 @@ class PayoutMethodService:
             session.rollback()
             raise Refused("shapid_name_mismatch")
 
+        user.shap_id = shap_id
         existing = session.scalar(
             select(PayoutMethod).where(PayoutMethod.user_id == user_id, PayoutMethod.shap_id == shap_id)
         )
@@ -197,6 +202,8 @@ class PayoutMethodService:
         method = self._owned(session, user_id, method_id)
         if not method.is_default:
             self._make_default(session, user_id, method)
+        if method.shap_id is not None:
+            self._user(session, user_id).shap_id = method.shap_id
         session.commit()
 
     def remove(self, session: Session, user_id: uuid.UUID, method_id: uuid.UUID) -> None:
@@ -213,6 +220,14 @@ class PayoutMethodService:
             )
             if newest is not None:
                 newest.is_default = True
+        user = self._user(session, user_id)
+        if method.shap_id is not None and user.shap_id == method.shap_id:
+            user.shap_id = session.scalar(
+                select(PayoutMethod.shap_id)
+                .where(PayoutMethod.user_id == user_id, PayoutMethod.shap_id.is_not(None))
+                .order_by(PayoutMethod.created_at.desc(), PayoutMethod.id)
+                .limit(1)
+            )
         session.commit()
 
     def _make_default(self, session: Session, user_id: uuid.UUID, method: PayoutMethod) -> None:
