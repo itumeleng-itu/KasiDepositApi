@@ -22,10 +22,11 @@ from app.ledger import (
     post,
 )
 from app.models import Deposit, DepositStatus, LedgerAccount, Voucher, VoucherStatus
+from app.money import percent_of
 from app.switch import VoucherSwitch
 from tests.conftest import assert_ledger_balanced
 
-FEE = 500
+FEE_BASIS_POINTS = 250
 JOIN_TIMEOUT_SECONDS = 60
 
 
@@ -46,14 +47,15 @@ def _setup(engine: Engine, switch: VoucherSwitch, float_cents: int, *amounts: in
 def _charge_with_float_check(session: Session, switch: VoucherSwitch, pin: str, reference: str) -> None:
     """The order the deposit flow will use: float lock and check, charge, record."""
     amount = switch.lookup(session, pin).amount_cents
-    lock_and_check_float(session, amount - FEE)
+    fee = percent_of(amount, FEE_BASIS_POINTS)
+    lock_and_check_float(session, amount - fee)
     charged = switch.charge(session, pin)
     deposit = Deposit(
         reference=reference,
         voucher_pin=pin,
         amount_cents=charged.amount_cents,
-        fee_cents=FEE,
-        payout_cents=charged.amount_cents - FEE,
+        fee_cents=fee,
+        payout_cents=charged.amount_cents - fee,
         destination={"kind": "shap_id", "shap_id": "+27821234560"},
         status=DepositStatus.CHARGED,
         idempotency_key=str(uuid.uuid4()),
@@ -65,8 +67,8 @@ def _charge_with_float_check(session: Session, switch: VoucherSwitch, pin: str, 
         deposit.id,
         [
             Entry(LedgerAccount.VOUCHER_RECEIVABLE, charged.amount_cents),
-            Entry(LedgerAccount.USER_PAYABLE, -(charged.amount_cents - FEE)),
-            Entry(LedgerAccount.FEE_INCOME, -FEE),
+            Entry(LedgerAccount.USER_PAYABLE, -(charged.amount_cents - fee)),
+            Entry(LedgerAccount.FEE_INCOME, -fee),
         ],
     )
 
@@ -84,14 +86,14 @@ def test_available_float_is_settlement_less_what_we_owe(clean_db: Engine, switch
         assert available_float(session) == 100_000
         _charge_with_float_check(session, switch, pin, "KD-FLTAAA")
         session.commit()
-        # R495 is owed but not yet paid out: it is spoken for.
-        assert available_float(session) == 100_000 - 49500
+        # R487.50 is owed but not yet paid out: it is spoken for.
+        assert available_float(session) == 100_000 - 48750
 
 
 def test_a_payout_the_float_cannot_cover_is_refused_before_charging(
     clean_db: Engine, switch: VoucherSwitch
 ) -> None:
-    (pin,) = _setup(clean_db, switch, 49_499, 50000)  # one cent short of R495
+    (pin,) = _setup(clean_db, switch, 48_749, 50000)  # one cent short of R487.50
     with make_session_factory(clean_db)() as session:
         with pytest.raises(InsufficientFloat) as excinfo:
             _charge_with_float_check(session, switch, pin, "KD-FLTAAA")
@@ -155,7 +157,7 @@ def _attempt(
 def test_two_deposits_cannot_both_spend_a_float_that_covers_one(
     clean_db: Engine, switch: VoucherSwitch, round_: int
 ) -> None:
-    # R600 of float; two R500 vouchers each need R495. Only one may be charged.
+    # R600 of float; two R500 vouchers each need R487.50. Only one may be charged.
     pins = _setup(clean_db, switch, 60_000, 50000, 50000)
     factory = make_session_factory(clean_db)
     outcomes = Outcomes()
@@ -175,7 +177,7 @@ def test_two_deposits_cannot_both_spend_a_float_that_covers_one(
     assert _status(clean_db, outcomes.charged[0]) is VoucherStatus.REDEEMED
     assert _status(clean_db, outcomes.refused[0]) is VoucherStatus.ACTIVE
     with factory() as session:
-        assert available_float(session) == 60_000 - 49500
+        assert available_float(session) == 60_000 - 48750
         assert_ledger_balanced(session)
 
 

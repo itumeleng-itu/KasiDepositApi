@@ -201,8 +201,8 @@ def test_deposits_are_private_and_listed_newest_first(
     }
     assert {k: listed[1][k] for k in ("value_cents", "fee_cents", "payout_cents")} == {
         "value_cents": 50000,
-        "fee_cents": 500,
-        "payout_cents": 49500,
+        "fee_cents": 1250,
+        "payout_cents": 48750,
     }
     assert api.get("/v1/me/deposits?limit=1", headers=_bearer(alice)).json()["deposits"][0]["id"] == second["id"]
 

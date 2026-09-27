@@ -71,7 +71,7 @@ def test_ordinary_payouts_go_pending_submitted_completed(
 
 @pytest.mark.parametrize(
     ("amount", "reason"),
-    [(40000, "bank_processing_error"), (40100, "limit_exceeded"), (40200, "bank_unavailable")],
+    [(39487, "bank_processing_error"), (39585, "limit_exceeded"), (39682, "bank_unavailable")],
 )
 def test_trigger_amounts_fail_with_their_documented_reason(
     provider: MockPayoutProvider, clock: FakeClock, amount: int, reason: str
@@ -106,7 +106,7 @@ def test_the_same_idempotency_key_returns_the_same_payout(
 
 
 def test_status_survives_a_restart(provider: MockPayoutProvider, clock: FakeClock) -> None:
-    ref = provider.create(40200, DESTINATION, "key-1")
+    ref = provider.create(39682, DESTINATION, "key-1")
     restarted = MockPayoutProvider(clock=clock)  # no memory of creating it
     clock.advance(COMPLETED_AFTER_SECONDS)
     status = restarted.status(ref)

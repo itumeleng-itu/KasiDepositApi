@@ -19,6 +19,14 @@ def format_rand(cents: Cents) -> str:
     return f"{sign}R{rand:,}.{remainder:02d}".replace(",", " ")
 
 
+def percent_of(cents: Cents, basis_points: int) -> Cents:
+    """`basis_points` hundredths of a percent of `cents`, rounded half up to a
+    whole cent, in integers only: 250 bp of 12345 is 308.625 -> 309."""
+    if cents < 0 or basis_points < 0:
+        raise ValueError("cents and basis_points must not be negative")
+    return (cents * basis_points + 5_000) // 10_000
+
+
 def rand_to_cents(rand: str | int | float) -> Cents:
     """Convert a rand amount to cents. For the seed script only.
 

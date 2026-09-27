@@ -17,10 +17,11 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.db import make_session_factory
 from app.ledger import Entry, post
 from app.models import Deposit, DepositStatus, LedgerAccount, LedgerEntry, Voucher, VoucherStatus
+from app.money import percent_of
 from app.switch import AlreadyRedeemed, VoucherNotFound, VoucherSwitch
 from tests.conftest import assert_ledger_balanced
 
-FEE = 500
+FEE_BASIS_POINTS = 250
 JOIN_TIMEOUT_SECONDS = 60
 
 
@@ -138,12 +139,13 @@ class Outcomes:
 def _record_charge(session: Session, pin: str, amount_cents: int, reference: str) -> None:
     """After a successful charge: the deposit row and its charge entries, as the
     deposit flow will write them, in the charging transaction."""
+    fee = percent_of(amount_cents, FEE_BASIS_POINTS)
     deposit = Deposit(
         reference=reference,
         voucher_pin=pin,
         amount_cents=amount_cents,
-        fee_cents=FEE,
-        payout_cents=amount_cents - FEE,
+        fee_cents=fee,
+        payout_cents=amount_cents - fee,
         destination={"kind": "shap_id", "shap_id": "+27821234560"},
         status=DepositStatus.CHARGED,
         idempotency_key=str(uuid.uuid4()),
@@ -155,8 +157,8 @@ def _record_charge(session: Session, pin: str, amount_cents: int, reference: str
         deposit.id,
         [
             Entry(LedgerAccount.VOUCHER_RECEIVABLE, amount_cents),
-            Entry(LedgerAccount.USER_PAYABLE, -(amount_cents - FEE)),
-            Entry(LedgerAccount.FEE_INCOME, -FEE),
+            Entry(LedgerAccount.USER_PAYABLE, -(amount_cents - fee)),
+            Entry(LedgerAccount.FEE_INCOME, -fee),
         ],
     )
 

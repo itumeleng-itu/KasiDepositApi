@@ -66,7 +66,7 @@ def create_app(
     app.state.deposits = DepositService(
         switch=switch,
         provider=payout_provider or MockPayoutProvider(),
-        fee_cents=settings.fee_cents,
+        fee_basis_points=settings.fee_basis_points,
         min_voucher_cents=settings.min_voucher_cents,
         token_ttl=timedelta(seconds=settings.voucher_token_ttl_seconds),
         pii=pii,

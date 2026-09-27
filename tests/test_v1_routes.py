@@ -138,7 +138,7 @@ def test_lookup_returns_the_app_shape(api: TestClient, clean_db: Engine) -> None
     assert response.status_code == 200
     body = response.json()
     assert set(body) == {"voucher_token", "value_cents", "fee_cents", "payout_cents"}
-    assert (body["value_cents"], body["fee_cents"], body["payout_cents"]) == (50000, 500, 49500)
+    assert (body["value_cents"], body["fee_cents"], body["payout_cents"]) == (50000, 1250, 48750)
     assert isinstance(body["voucher_token"], str) and len(body["voucher_token"]) >= 32
     assert pin not in response.text
     assert _voucher_status(clean_db, pin) is VoucherStatus.ACTIVE  # looking charges nothing
@@ -196,7 +196,7 @@ def test_create_returns_201_with_the_app_shape(api: TestClient, clean_db: Engine
     uuid.UUID(body["id"])
     assert body["reference"].startswith("KD-") and len(body["reference"]) == 9
     assert body["status"] in {"pending", "submitted"}
-    assert (body["payout_cents"], body["failure_reason"]) == (49500, None)
+    assert (body["payout_cents"], body["failure_reason"]) == (48750, None)
     assert "X-Demo-Surface" not in response.headers
     assert _voucher_status(clean_db, pin) is VoucherStatus.REDEEMED
     _balanced(clean_db)
@@ -258,11 +258,11 @@ def test_an_amount_in_the_body_is_ignored(api: TestClient, clean_db: Engine) -> 
         headers={"Idempotency-Key": str(uuid.uuid4())},
     )
     assert response.status_code == 201
-    assert response.json()["payout_cents"] == 49500  # from the voucher row, not the client
+    assert response.json()["payout_cents"] == 48750  # from the voucher row, not the client
 
 
 def test_insufficient_float_charges_nothing(api: TestClient, clean_db: Engine) -> None:
-    _fund(clean_db, 49_499)  # one cent short of R495
+    _fund(clean_db, 48_749)  # one cent short of R487.50
     pin = _vend(clean_db, 50000)
     token = _lookup(api, pin)
     response = _deposit(api, token)
@@ -315,13 +315,13 @@ def test_voucher_too_small_is_refused_on_create(api: TestClient, clean_db: Engin
 
 
 def test_voucher_too_small_is_currently_unreachable(test_settings: Settings) -> None:
-    # Vending refuses anything under MIN_VOUCHER_CENTS, and the fee is below it,
-    # so no vendable voucher is too small today. If either changes, this fails
+    # Vending refuses anything under MIN_VOUCHER_CENTS, and the fee is a
+    # percentage under 100%, so no vendable voucher is too small today. If either changes, this fails
     # and the rule on create becomes live.
     app = create_app(test_settings)
     deposits = app.state.deposits
     assert not deposits.is_too_small(test_settings.min_voucher_cents)
-    assert test_settings.min_voucher_cents > test_settings.fee_cents
+    assert deposits.fee_for(test_settings.min_voucher_cents) < test_settings.min_voucher_cents
 
 
 @pytest.mark.parametrize(
@@ -352,9 +352,9 @@ def test_polling_reaches_completed_and_settles_the_ledger(
     assert api.get(f"/v1/deposits/{deposit_id}").json()["status"] in {"pending", "submitted"}
     clock.advance(COMPLETED_AFTER_SECONDS)
     body = api.get(f"/v1/deposits/{deposit_id}").json()
-    assert (body["status"], body["payout_cents"], body["failure_reason"]) == ("completed", 49500, None)
+    assert (body["status"], body["payout_cents"], body["failure_reason"]) == ("completed", 48750, None)
     with Session(clean_db) as session:
-        assert available_float(session) == FLOAT - 49500
+        assert available_float(session) == FLOAT - 48750
         assert_ledger_balanced(session)
     # Polling a settled deposit again changes nothing.
     assert api.get(f"/v1/deposits/{deposit_id}").json()["status"] == "completed"
@@ -369,7 +369,7 @@ def test_a_failed_payout_reverses_the_charge_so_try_again_works(
     api: TestClient, clean_db: Engine, clock: FakeClock, voucher_cents: int, reason: str
 ) -> None:
     _fund(clean_db)
-    pin = _vend(clean_db, voucher_cents)  # payout = voucher - R5 hits the trigger
+    pin = _vend(clean_db, voucher_cents)  # payout = voucher less 2.5% hits the trigger
     deposit_id = _deposit(api, _lookup(api, pin)).json()["id"]
     clock.advance(COMPLETED_AFTER_SECONDS)
     body = api.get(f"/v1/deposits/{deposit_id}").json()

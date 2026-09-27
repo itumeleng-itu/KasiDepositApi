@@ -2,7 +2,7 @@ from typing import cast
 
 import pytest
 
-from app.money import format_rand, rand_to_cents
+from app.money import format_rand, percent_of, rand_to_cents
 
 
 @pytest.mark.parametrize(
@@ -60,3 +60,25 @@ def test_rand_to_cents_rejects_bad_amounts(bad: str | float) -> None:
 def test_rand_to_cents_rejects_bool() -> None:
     with pytest.raises(TypeError):
         rand_to_cents(True)
+
+
+@pytest.mark.parametrize(
+    ("cents", "basis_points", "expected"),
+    [
+        (50000, 250, 1250),  # R500 at 2.5% is R12.50
+        (1000, 250, 25),
+        (12345, 250, 309),  # 308.625 rounds up
+        (40500, 250, 1013),  # 1012.5: half rounds up
+        (1010, 250, 25),  # 25.25 rounds down
+        (50000, 0, 0),
+        (0, 250, 0),
+    ],
+)
+def test_percent_of(cents: int, basis_points: int, expected: int) -> None:
+    assert percent_of(cents, basis_points) == expected
+
+
+@pytest.mark.parametrize(("cents", "basis_points"), [(-1, 250), (100, -1)])
+def test_percent_of_rejects_negatives(cents: int, basis_points: int) -> None:
+    with pytest.raises(ValueError):
+        percent_of(cents, basis_points)
