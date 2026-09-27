@@ -274,6 +274,12 @@ class User(Base):
     HMAC) finds a returning user and enforces one account per ID;
     `id_number_encrypted` (AES-GCM) keeps the verified identity. See app/pii.py.
     `updated_at` is maintained by a database trigger.
+
+    `shap_id` is a copy of the user's current PayShap number: set when they add
+    one or choose one as their default, and moved to their newest remaining
+    PayShap number (or cleared) when it is removed. `PayoutMethod` stays the
+    source of truth for where money goes; this is for looking a user up by
+    number. Plaintext, like `PayoutMethod.shap_id`, which holds the same value.
     """
 
     __tablename__ = "users"
@@ -294,9 +300,14 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    shap_id: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (
         CheckConstraint("char_length(full_names) BETWEEN 3 AND 100", name="full_names_length"),
+        CheckConstraint(
+            r"shap_id IS NULL OR shap_id ~ '^\+27[678][0-9]{8}(@[a-z_]+)?$'",
+            name="shap_id_format",
+        ),
         CheckConstraint("id_number_hash ~ '^[0-9a-f]{64}$'", name="id_number_hash_format"),
         CheckConstraint("octet_length(id_number_encrypted) > 12", name="id_number_encrypted_present"),
     )

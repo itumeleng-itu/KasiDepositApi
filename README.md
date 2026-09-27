@@ -98,7 +98,11 @@ URL includes `/v1`.
   `shapid_name_mismatch`. A bank account must belong to the user's ID number
   (`account_not_found`, `account_holder_mismatch`), and its holder is always
   the registered name. Up to 5; the first is the default; a deposit names one
-  by `payout_method_id` and stores a snapshot of it.
+  by `payout_method_id` and stores a snapshot of it. The user's current
+  PayShap number is also copied onto `users.shap_id` (migration
+  `0006_users_shap_id`): set when one is added or chosen as the default,
+  moved to their newest remaining PayShap number (or cleared) when it is
+  removed. Payout methods stay the source of truth for where money goes.
 - **Personal numbers are ciphertext.** SA ID numbers and bank account numbers
   are never stored in plaintext: AES-256-GCM under `PII_KEY`, plus keyed HMACs
   to find a returning user and refuse a duplicate account (`app/pii.py`). No
