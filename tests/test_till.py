@@ -72,9 +72,23 @@ def test_what_the_page_does_needs_the_code(till_api: TestClient) -> None:
     assert {"available_display", "settlement_display"} <= set(topped.json())
 
 
+def test_recent_sales_find_a_sold_voucher_without_its_pin(till_api: TestClient) -> None:
+    """What the Recent sales screen shows: the voucher just sold, found by its
+    serial, with the PIN masked to its last 4 digits."""
+    assert till_api.get("/demo/vouchers").status_code == 404
+    sold = till_api.post("/demo/vouchers", json={"amount_cents": 20000}, headers={"X-Demo-Key": KEY}).json()
+    recent = till_api.get("/demo/vouchers", headers={"X-Demo-Key": KEY})
+    assert recent.status_code == 200
+    [row] = [v for v in recent.json() if v["serial"] == sold["serial"]]
+    assert row["pin_masked"] == "*" * 12 + sold["pin"][-4:]
+    assert sold["pin"] not in recent.text
+    assert row["status"] == "active" and row["redeemed_at"] is None
+    assert row["amount_display"] == sold["amount_display"]
+
+
 # --- the page's money handling, run in Node ------------------------------------------
 
-_FUNCTIONS = ("randToCents", "formatRand", "groupPin")
+_FUNCTIONS = ("randToCents", "formatRand", "groupPin", "matchesSearch", "statusText", "enquiryText")
 
 
 def _page_functions() -> str:
@@ -104,3 +118,36 @@ def test_the_page_converts_rand_to_whole_cents() -> None:
     assert out["cents"] == [5000, 15050, 15050, 100000, 100025, 1, None, None, None, None]
     assert out["rand"] == ["R0.00", "R0.05", "R500.00", "R1 234.56", "R1 000 000.00", "-R1.50"]
     assert out["pin"] == "0754 7622 1981 6030"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is not installed")
+def test_recent_sales_search_and_enquiry_text() -> None:
+    voucher = {
+        "serial": "20260926053159711322",
+        "pin_masked": "************2922",
+        "amount_display": "R500.00",
+        "status": "redeemed",
+        "issued_at": "2026-09-26T13:52:00Z",
+        "redeemed_at": "2026-09-26T14:10:00Z",
+    }
+    queries = ["", "2922", "4985 1613 9241 2922", "9711322", "2026-0926", "1234", "4985161392410000", "abc"]
+    program = _page_functions() + (
+        f"\nconst v = {json.dumps(voucher)};"
+        f"\nconst queries = {json.dumps(queries)};"
+        "\nconsole.log(JSON.stringify({"
+        " found: queries.map((q) => matchesSearch(v, q)),"
+        " text: enquiryText(v, (iso) => `<${iso}>`),"
+        " unused: statusText({ ...v, status: 'active' }) }));"
+    )
+    result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+    assert out["found"] == [True, True, True, True, True, False, False, True]
+    assert out["text"] == (
+        "KasiDeposit voucher enquiry\n"
+        "Serial: 20260926053159711322\n"
+        "PIN ending: 2922\n"
+        "Amount: R500.00\n"
+        "Sold: <2026-09-26T13:52:00Z>\n"
+        "Status: Used (<2026-09-26T14:10:00Z>)"
+    )
+    assert out["unused"] == "Not used yet"
