@@ -61,6 +61,20 @@
   .slip dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; text-align: left; margin: 12px auto 0; max-width: 320px; }
   .slip dt { color: var(--muted); }
   .slip dd { margin: 0; font-weight: 600; }
+  .sales { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 8px; }
+  .sale {
+    width: 100%; text-align: left; background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line); display: grid; gap: 2px;
+  }
+  .sale-top { display: flex; justify-content: space-between; gap: 8px; font-weight: 700; }
+  .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; }
+  .badge { font-size: 13px; font-weight: 700; border-radius: 999px; padding: 2px 10px; white-space: nowrap; }
+  .badge.active { background: var(--ok-bg); color: var(--brand); }
+  .badge.redeemed { background: var(--line); color: var(--ink); }
+  .enquiry dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+  .enquiry dt { color: var(--muted); }
+  .enquiry dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .header-links { display: flex; gap: 4px; }
   [hidden] { display: none !important; }
   @media print {
     body { background: #fff; color: #000; }
@@ -76,7 +90,10 @@
 <main>
   <header class="noprint">
     <h1>KasiDeposit Till</h1>
-    <button type="button" class="link" id="to-manager" hidden>Manager</button>
+    <div class="header-links">
+      <button type="button" class="link" id="to-recent" hidden>Recent sales</button>
+      <button type="button" class="link" id="to-manager" hidden>Manager</button>
+    </div>
   </header>
 
   <!-- First use on this device: the till code (the server's DEMO_API_KEY). -->
@@ -140,6 +157,42 @@
     </div>
   </section>
 
+  <!-- Recent sales: for when a customer comes back about a voucher. PINs are
+       masked by the server; the till never shows a sold PIN again. -->
+  <section id="recent" class="panel" hidden>
+    <h2>Recent sales</h2>
+    <p class="muted">The last 50 vouchers sold. If a customer says their voucher isn't working,
+      find it by the serial or the last 4 digits of the PIN on their slip.</p>
+    <label for="recent-search">Serial or PIN</label>
+    <input id="recent-search" inputmode="numeric" autocomplete="off" placeholder="e.g. 2922">
+    <div id="recent-error" class="error" role="alert" hidden></div>
+    <p class="muted" id="recent-status" aria-live="polite"></p>
+    <ul class="sales" id="recent-list"></ul>
+    <div class="row">
+      <button type="button" class="secondary" id="recent-refresh">Refresh</button>
+      <button type="button" class="primary" id="recent-back">Back to till</button>
+    </div>
+  </section>
+
+  <!-- One voucher, laid out for an enquiry. -->
+  <section id="enquiry" class="panel enquiry" hidden>
+    <h2>Voucher details</h2>
+    <dl>
+      <dt>Status</dt><dd id="enq-status"></dd>
+      <dt>Amount</dt><dd id="enq-amount"></dd>
+      <dt>Serial</dt><dd class="mono" id="enq-serial"></dd>
+      <dt>PIN</dt><dd class="mono" id="enq-pin"></dd>
+      <dt>Sold</dt><dd id="enq-issued"></dd>
+      <dt>Used</dt><dd id="enq-redeemed"></dd>
+    </dl>
+    <p class="muted" id="enq-advice"></p>
+    <div class="row">
+      <button type="button" class="secondary" id="enq-copy">Copy details</button>
+      <button type="button" class="primary" id="enq-back">Back to list</button>
+    </div>
+    <p class="muted" id="enq-copied" aria-live="polite"></p>
+  </section>
+
   <!-- Manager: the float. -->
   <section id="manager" class="panel" hidden>
     <h2>Manager</h2>
@@ -193,11 +246,12 @@ const CODE_KEY = "kasideposit.tillCode";
 const REQUEST_TIMEOUT_MS = 75000; // the free server can take ~60 s to wake
 
 const $ = (id) => document.getElementById(id);
-const screens = ["setup", "sell", "confirm", "working", "slip", "manager"];
+const screens = ["setup", "sell", "confirm", "working", "slip", "recent", "enquiry", "manager"];
 
 function show(name) {
   for (const s of screens) $(s).hidden = s !== name;
   $("to-manager").hidden = !(name === "sell" || name === "slip");
+  $("to-recent").hidden = !(name === "sell" || name === "slip");
 }
 function setError(id, message) {
   $(id).textContent = message || "";
@@ -222,6 +276,39 @@ function formatRand(cents) {
   return `${sign}R${rand}.${String(abs % 100).padStart(2, "0")}`;
 }
 function groupPin(pin) { return pin.replace(/(\d{4})(?=\d)/g, "$1 "); }
+function formatWhen(iso) {
+  return new Date(iso).toLocaleString("en-ZA", {
+    timeZone: "Africa/Johannesburg", dateStyle: "medium", timeStyle: "short",
+  });
+}
+
+/* Recent sales search: what the customer reads off their slip. Digits only,
+   so spaces and dashes don't matter. A match on the serial, or on the PIN's
+   last 4 digits (all the till ever sees of a sold PIN), so typing the whole
+   PIN finds it too. */
+function matchesSearch(voucher, query) {
+  const digits = String(query).replace(/\D/g, "");
+  if (!digits) return true;
+  const pinLast4 = voucher.pin_masked.slice(-4);
+  return voucher.serial.includes(digits) || pinLast4.includes(digits.slice(-4));
+}
+
+/* The status in the cashier's words. */
+function statusText(voucher) {
+  return voucher.status === "redeemed" ? "Used" : "Not used yet";
+}
+
+/* One voucher as plain text, to paste into an enquiry (WhatsApp, email). */
+function enquiryText(voucher, when) {
+  return [
+    "KasiDeposit voucher enquiry",
+    `Serial: ${voucher.serial}`,
+    `PIN ending: ${voucher.pin_masked.slice(-4)}`,
+    `Amount: ${voucher.amount_display}`,
+    `Sold: ${when(voucher.issued_at)}`,
+    `Status: ${statusText(voucher)}${voucher.redeemed_at ? ` (${when(voucher.redeemed_at)})` : ""}`,
+  ].join("\n");
+}
 
 /* The server's QR (inline SVG from app/qr.py), parsed as SVG rather than
    inserted as HTML, so nothing but an <svg> element can reach the page. */
@@ -329,9 +416,7 @@ $("confirm-yes").addEventListener("click", async () => {
     $("slip-pin").textContent = groupPin(voucher.pin);
     showQr(voucher.qr_svg);
     $("slip-serial").textContent = voucher.serial;
-    $("slip-time").textContent = new Date(voucher.issued_at).toLocaleString("en-ZA", {
-      timeZone: "Africa/Johannesburg", dateStyle: "medium", timeStyle: "short",
-    });
+    $("slip-time").textContent = formatWhen(voucher.issued_at);
     $("other").value = "";
     show("slip");
   } catch (err) {
@@ -343,6 +428,85 @@ $("confirm-yes").addEventListener("click", async () => {
 
 $("print").addEventListener("click", () => window.print());
 $("new-sale").addEventListener("click", () => { setError("sell-error", ""); show("sell"); });
+
+/* --- recent sales ------------------------------------------------------------ */
+let recentSales = [];
+
+function renderRecent() {
+  const list = $("recent-list");
+  list.replaceChildren();
+  const query = $("recent-search").value;
+  const shown = recentSales.filter((v) => matchesSearch(v, query));
+  if (recentSales.length === 0) $("recent-status").textContent = "No vouchers sold yet.";
+  else if (shown.length === 0) $("recent-status").textContent = "No voucher in the last 50 sales matches that. Check the serial on the slip.";
+  else $("recent-status").textContent = query.trim() ? `${shown.length} matching` : "";
+  for (const v of shown) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "sale";
+    const top = document.createElement("span");
+    top.className = "sale-top";
+    const amount = document.createElement("span");
+    amount.textContent = `${v.amount_display} · PIN …${v.pin_masked.slice(-4)}`;
+    const badge = document.createElement("span");
+    badge.className = `badge ${v.status}`;
+    badge.textContent = statusText(v);
+    top.append(amount, badge);
+    const meta = document.createElement("span");
+    meta.className = "muted";
+    meta.textContent = `${formatWhen(v.issued_at)} · Serial ${v.serial}`;
+    button.append(top, meta);
+    button.addEventListener("click", () => showEnquiry(v));
+    item.append(button);
+    list.append(item);
+  }
+}
+
+async function loadRecent() {
+  setError("recent-error", "");
+  $("recent-status").textContent = "Loading…";
+  try {
+    recentSales = await demoRequest("GET", "/demo/vouchers");
+    renderRecent();
+  } catch (err) {
+    if (err instanceof WrongCode) { forgetCode(); show("setup"); return; }
+    $("recent-status").textContent = "";
+    setError("recent-error", err.message);
+  }
+}
+
+let enquiryVoucher = null;
+
+function showEnquiry(v) {
+  enquiryVoucher = v;
+  $("enq-status").textContent = statusText(v);
+  $("enq-amount").textContent = v.amount_display;
+  $("enq-serial").textContent = v.serial;
+  $("enq-pin").textContent = groupPin(v.pin_masked);
+  $("enq-issued").textContent = formatWhen(v.issued_at);
+  $("enq-redeemed").textContent = v.redeemed_at ? formatWhen(v.redeemed_at) : "—";
+  $("enq-advice").textContent = v.status === "redeemed"
+    ? "This voucher has already been used in the KasiDeposit app, so it can't be used again. If the customer says they didn't use it, copy these details for the enquiry."
+    : "This voucher hasn't been used. The customer can scan the QR code or type the full PIN from their slip in the KasiDeposit app. If it still won't work, copy these details for the enquiry.";
+  $("enq-copied").textContent = "";
+  show("enquiry");
+}
+
+$("to-recent").addEventListener("click", () => { $("recent-search").value = ""; show("recent"); loadRecent(); });
+$("recent-search").addEventListener("input", renderRecent);
+$("recent-refresh").addEventListener("click", loadRecent);
+$("recent-back").addEventListener("click", () => show("sell"));
+$("enq-back").addEventListener("click", () => show("recent"));
+$("enq-copy").addEventListener("click", async () => {
+  if (!enquiryVoucher) return;
+  try {
+    await navigator.clipboard.writeText(enquiryText(enquiryVoucher, formatWhen));
+    $("enq-copied").textContent = "Copied. Paste it into your message to KasiDeposit.";
+  } catch {
+    $("enq-copied").textContent = "Couldn't copy on this device. Write down the serial instead.";
+  }
+});
 
 /* --- manager: the float ----------------------------------------------------- */
 async function loadFloat() {
