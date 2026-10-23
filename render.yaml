@@ -37,3 +37,28 @@ services:
       # database. If it is lost, the stored numbers cannot be decrypted.
       - key: PII_KEY
         sync: false
+      # Guards POST /internal/sweep (X-Sweep-Key header), which finishes
+      # deposits whose depositor stopped polling. Without this variable the
+      # route is not mounted and such a deposit stays charged for good: the
+      # voucher is spent and the money neither arrives nor comes back. See
+      # "Scheduling the sweep" below.
+      - key: SWEEP_KEY
+        generateValue: true
+
+# Scheduling the sweep
+# --------------------
+# Nothing inside the process runs on a timer, and a thread would die with the
+# instance (free plan, sleeps after 15 minutes). Render's own cron jobs are a
+# paid feature, so on the free plan the schedule has to come from outside:
+# any pinger (cron-job.org, UptimeRobot, a GitHub Actions `schedule`) calling
+#
+#     POST https://<service>.onrender.com/internal/sweep
+#     X-Sweep-Key: <the generated SWEEP_KEY, from the dashboard>
+#
+# every few minutes. Safe at any rate: it only advances deposits already due
+# to advance, re-checks each under its row lock, and does at most 25 per call
+# (`SWEEP_LIMIT`), so overlapping calls cannot double-pay. When the answer
+# has "more_likely": true the call filled its budget and more is waiting.
+#
+# The same request also keeps the instance warm, which is the other thing the
+# free plan needs before a demo — so one schedule covers both.

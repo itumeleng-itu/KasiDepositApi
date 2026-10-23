@@ -23,7 +23,7 @@ from app.identity import IdentityVerifier, MockIdentityVerifier
 from app.payouts import MockPayoutProvider, PayoutProvider
 from app.payout_methods import PayoutMethodService
 from app.pii import PiiCipher
-from app.routes import demo, health, till, v1
+from app.routes import demo, health, internal, till, v1
 from app.schema_check import check_schema_is_current
 from app.switch import VoucherSwitch
 from app.users import UserService
@@ -78,6 +78,9 @@ def create_app(
 
     app.include_router(health.router)
     v1.mount(app)
+    # Only with a SWEEP_KEY; see app/routes/internal.py. Not demo-gated:
+    # stranding a charged deposit is a production failure, not a demo one.
+    internal.mount(app, settings)
     if settings.demo_routes_enabled:
         # Absent, not forbidden: with the flag off, /demo simply does not exist.
         demo.mount(app, settings)

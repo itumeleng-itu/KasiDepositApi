@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # register users or take account payouts, so nothing personal is ever
     # stored unencrypted. Losing it makes stored ciphertexts unrecoverable.
     pii_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
+    # Secret that POST /internal/sweep must present in the X-Sweep-Key header.
+    # Unset: the route is not mounted at all, and stranded deposits are only
+    # ever finished by their own depositor polling (app/deposits.py `sweep`).
+    # Nothing in the process runs on a timer, so something outside has to
+    # call it; that caller is on the open internet, hence a key.
+    sweep_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
 
     @field_validator("database_url")
     @classmethod

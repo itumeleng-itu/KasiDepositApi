@@ -28,6 +28,15 @@ The flow
    failure it reverses the charge (below) and fails. A provider that is slow
    or unreachable is never a failure: the deposit stays where it is.
 
+5. Sweeping (`sweep`), for the deposits step 4 never hears about again. From
+   `charged` onwards the voucher is redeemed and the cash is spent, so a
+   deposit that stops being polled — closed app, flat battery, no signal —
+   must not stay there: the money would neither arrive nor come back, and
+   `get_deposit` serves only the depositor, so no other request could move
+   it. The sweeper advances stale deposits through the same `_advance` path
+   a poll uses, with no user attached. It is driven from outside the process
+   (see app/routes/internal.py), because nothing in here runs on a timer.
+
 Idempotency
 -----------
 The same Idempotency-Key returns the same deposit (200, not 201). It is
@@ -77,7 +86,7 @@ from typing import Any
 
 from psycopg.errors import UniqueViolation
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.banks import BANK_IDS_BY_API_CODE
@@ -117,6 +126,18 @@ APP_STATUS: dict[DepositStatus, str] = {
     S.SETTLED: "completed",
     S.FAILED: "failed",
 }
+
+# --- sweeping -----------------------------------------------------------------
+# How long a deposit must have sat untouched before the sweeper takes it on.
+# An app polling every second is already advancing its own deposit; stepping
+# in sooner would only contend for the row lock to do work that is happening
+# anyway. A minute is well past the point where a phone has gone away.
+SWEEP_STALE_AFTER = timedelta(seconds=60)
+# One call's budget. Each deposit costs at least one provider round trip, the
+# connection's statement_timeout is 30s and a free instance's request window
+# is short, so a sweep does a bounded amount and returns. Anything left is
+# still stranded and the next call picks it up, oldest first.
+SWEEP_LIMIT = 25
 
 REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no O/0, no I/1
 REFERENCE_LENGTH = 6
@@ -218,6 +239,22 @@ def public_destination(stored: Mapping[str, Any]) -> dict[str, Any]:
 
 def _is_unique_violation(exc: IntegrityError, constraint: str) -> bool:
     return isinstance(exc.orig, UniqueViolation) and exc.orig.diag.constraint_name == constraint
+
+
+@dataclass(frozen=True)
+class SweepResult:
+    """What one sweep did. `examined` is bounded by the call's limit, so
+    equal numbers mean there is probably more waiting."""
+
+    examined: int
+    settled: int
+    failed: int
+    # Looked at, still in flight: the provider had nothing new to say. Not a
+    # problem on its own — a payout can legitimately take a while.
+    unresolved: int
+    # Could not be touched this time, almost always because a poll holds the
+    # row lock. That caller is doing the same work, so this is not a loss.
+    skipped: int
 
 
 class DepositService:
@@ -590,13 +627,17 @@ class DepositService:
 
     # --- status ------------------------------------------------------------
 
-    def get_deposit(
-        self, session: Session, deposit_id: uuid.UUID, user_id: uuid.UUID
-    ) -> DepositView:
+    def _advance(self, session: Session, deposit_id: uuid.UUID) -> Deposit:
+        """Move one deposit as far towards settled or failed as it can go now.
+
+        The whole state machine, with no notion of who is asking: a status
+        poll and the sweeper (`sweep`) both come through here, so a deposit
+        finished by a background call is finished exactly as the app would
+        have finished it. Each step takes the deposit's row lock and
+        re-checks its status, so two callers racing on one deposit is safe
+        — the second finds the work done and returns.
+        """
         deposit = self._load(session, deposit_id)
-        if deposit.user_id != user_id:
-            session.rollback()
-            raise Refused("deposit_not_found")
         if deposit.status is S.CHARGED:
             session.rollback()
             self._instruct_payout(session, deposit_id)
@@ -605,9 +646,104 @@ class DepositService:
             session.rollback()
             self._advance_payout(session, deposit_id)
             deposit = self._load(session, deposit_id)
-        view = DepositView.of(deposit)
+        return deposit
+
+    def get_deposit(
+        self, session: Session, deposit_id: uuid.UUID, user_id: uuid.UUID
+    ) -> DepositView:
+        deposit = self._load(session, deposit_id)
+        if deposit.user_id != user_id:
+            session.rollback()
+            raise Refused("deposit_not_found")
+        view = DepositView.of(self._advance(session, deposit_id))
         session.rollback()  # end the read transaction; never leave it idle
         return view
+
+    # --- sweeping ----------------------------------------------------------
+
+    def stranded(
+        self,
+        session: Session,
+        *,
+        stale_after: timedelta = SWEEP_STALE_AFTER,
+        limit: int = SWEEP_LIMIT,
+    ) -> list[uuid.UUID]:
+        """Deposits that have been charged but are going nowhere, oldest first.
+
+        `updated_at` is maintained by a database trigger, so it is the last
+        time anything actually moved this deposit — which is what "untouched"
+        has to mean here, not when it was created.
+
+        A plain read, with no lock: the advance that follows locks the row
+        and re-checks the status itself, so a candidate that someone else
+        finishes first simply costs one wasted look.
+        """
+        cutoff = self.now() - stale_after
+        ids = list(
+            session.scalars(
+                select(Deposit.id)
+                .where(
+                    Deposit.status.in_((S.CHARGED, S.PAYING)),
+                    Deposit.updated_at < cutoff,
+                )
+                .order_by(Deposit.updated_at)
+                .limit(limit)
+            )
+        )
+        session.rollback()  # end the read transaction; never leave it idle
+        return ids
+
+    def sweep(
+        self,
+        session: Session,
+        *,
+        stale_after: timedelta = SWEEP_STALE_AFTER,
+        limit: int = SWEEP_LIMIT,
+    ) -> "SweepResult":
+        """Finish deposits nobody is polling for.
+
+        A deposit's voucher is redeemed in the same transaction that records
+        it, so from `charged` onwards the customer's cash is already spent.
+        Until this existed, the only thing that moved a deposit on was the
+        depositor reading its status — and `get_deposit` refuses a deposit
+        that is not the caller's, so a phone that went away (closed app, flat
+        battery, lost signal) left its deposit charged for good: the money
+        neither arrived nor came back, and no other request could rescue it.
+
+        Called from outside with no user, so it must stay safe to call at any
+        time and as often as anything likes. It advances through `_advance`,
+        the same path a poll uses, and every step re-checks under the row
+        lock; a deposit the provider still cannot resolve is simply left for
+        the next call.
+
+        One failed deposit never stops the rest: a database error on one
+        (most likely `lock_timeout`, because a poll holds the row) is counted
+        and skipped, which is the right answer anyway — whoever holds the
+        lock is already doing this work.
+        """
+        settled = failed = unresolved = skipped = 0
+        ids = self.stranded(session, stale_after=stale_after, limit=limit)
+        for deposit_id in ids:
+            try:
+                status = self._advance(session, deposit_id).status
+                session.rollback()
+            except SQLAlchemyError:
+                session.rollback()
+                skipped += 1
+                continue
+            if status is S.SETTLED:
+                settled += 1
+            elif status is S.FAILED:
+                failed += 1
+            else:
+                unresolved += 1
+        return SweepResult(
+            examined=len(ids),
+            settled=settled,
+            failed=failed,
+            unresolved=unresolved,
+            skipped=skipped,
+        )
 
     # --- history -----------------------------------------------------------
 
