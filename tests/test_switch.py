@@ -203,3 +203,56 @@ def test_recent_masks_pins_and_orders_newest_first(
     assert summaries[0].status is VoucherStatus.REDEEMED
     assert summaries[0].redeemed_at is not None
     assert summaries[1].pin_masked == "************1111"
+
+
+# --- vending the same sale twice --------------------------------------------------------
+
+
+def test_the_same_key_vends_once_and_then_replays(
+    db_session: Session, voucher_switch: VoucherSwitch
+) -> None:
+    key = "11111111-1111-4111-8111-111111111111"
+
+    first = voucher_switch.vend(db_session, 50000, key)
+    db_session.commit()
+    second = voucher_switch.vend(db_session, 50000, key)
+
+    assert first.replayed is False
+    assert second.replayed is True
+    assert (second.pin, second.serial) == (first.pin, first.serial)
+    assert db_session.scalar(select(func.count()).select_from(Voucher)) == 1
+
+
+def test_a_replay_survives_the_savepoint_it_rolled_back(
+    db_session: Session, voucher_switch: VoucherSwitch
+) -> None:
+    # The replay path runs after a unique violation rolled back its
+    # savepoint. Work the caller did before the retry must still be there,
+    # or a deposit flow calling vend could lose its own rows.
+    key = "22222222-2222-4222-8222-222222222222"
+    voucher_switch.vend(db_session, 10000, key)
+    db_session.commit()
+
+    kept = voucher_switch.vend(db_session, 30000)  # an unrelated sale, no key
+    replay = voucher_switch.vend(db_session, 10000, key)
+    db_session.commit()
+
+    assert replay.replayed is True
+    pins = set(db_session.scalars(select(Voucher.pin)))
+    assert kept.pin in pins
+    assert len(pins) == 2
+
+
+def test_vending_without_a_key_is_never_a_replay(
+    db_session: Session, voucher_switch: VoucherSwitch
+) -> None:
+    # Many vouchers carry no key (every one issued before the column), and
+    # NULL must not collide with NULL under the unique constraint.
+    for _ in range(3):
+        voucher_switch.vend(db_session, 10000)
+    db_session.commit()
+
+    assert db_session.scalar(select(func.count()).select_from(Voucher)) == 3
+    assert db_session.scalar(
+        select(func.count()).select_from(Voucher).where(Voucher.idempotency_key.is_(None))
+    ) == 3

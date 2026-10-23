@@ -85,6 +85,11 @@ class Voucher(Base):
     )
     redeemed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     serial: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    # The vending client's key for this sale, so a retry after a timeout
+    # returns the voucher already issued instead of vending a second one.
+    # Nullable: vouchers issued before this column existed have none, and
+    # Postgres allows many NULLs under a unique constraint.
+    idempotency_key: Mapped[str | None] = mapped_column(Text, unique=True)
 
     __table_args__ = (
         CheckConstraint("amount_cents > 0", name="amount_cents_positive"),
