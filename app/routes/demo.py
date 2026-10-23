@@ -22,11 +22,12 @@ review behaviour can be shown without building up a real pattern.
 """
 
 import secrets
+import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -60,9 +61,40 @@ SwitchDep = Annotated[VoucherSwitch, Depends(get_switch)]
 
 
 @router.post("/vouchers", status_code=status.HTTP_201_CREATED)
-def vend_voucher(body: VendRequest, session: SessionDep, switch: SwitchDep) -> VendResponse:
+def vend_voucher(
+    body: VendRequest,
+    response: Response,
+    session: SessionDep,
+    switch: SwitchDep,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> VendResponse:
+    """Vend one voucher. `Idempotency-Key` is required, as on /v1/deposits.
+
+    Required rather than optional because the cash is already in the till by
+    the time this is called: a client that retries without a key buys the
+    shop a second voucher, and whether that happens must not be left to the
+    client remembering. A UUID, so one till cannot guess another's keys.
+    """
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=[{"type": "missing", "loc": ["header", "Idempotency-Key"], "msg": "required"}],
+        )
     try:
-        vended = switch.vend(session, body.amount_cents)
+        uuid.UUID(idempotency_key)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=[
+                {
+                    "type": "uuid_parsing",
+                    "loc": ["header", "Idempotency-Key"],
+                    "msg": "must be a UUID",
+                }
+            ],
+        ) from None
+    try:
+        vended = switch.vend(session, body.amount_cents, idempotency_key)
     except AmountOutOfRange as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -77,6 +109,9 @@ def vend_voucher(body: VendRequest, session: SessionDep, switch: SwitchDep) -> V
             ],
         ) from exc
     session.commit()
+    # 200 rather than 201 on a replay: nothing was created by this call.
+    if vended.replayed:
+        response.status_code = status.HTTP_200_OK
     return VendResponse.from_vended(vended)
 
 

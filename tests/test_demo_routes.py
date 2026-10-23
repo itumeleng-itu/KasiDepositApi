@@ -7,6 +7,7 @@ from sqlalchemy import Engine, text
 
 from app.config import Settings
 from app.main import create_app
+from tests.conftest import vend_headers
 
 URL = "/demo/vouchers"
 
@@ -16,7 +17,7 @@ def _assert_demo_header(headers: Mapping[str, str]) -> None:
 
 
 def test_vend_returns_201_with_documented_shape(client: TestClient) -> None:
-    response = client.post(URL, json={"amount_cents": 50000})
+    response = client.post(URL, json={"amount_cents": 50000}, headers=vend_headers())
     assert response.status_code == 201
     _assert_demo_header(response.headers)
 
@@ -33,14 +34,14 @@ def test_vend_returns_201_with_documented_shape(client: TestClient) -> None:
 
 @pytest.mark.parametrize("amount", [1000, 1001, 499999, 500000])
 def test_amounts_at_and_inside_the_limits_are_accepted(client: TestClient, amount: int) -> None:
-    response = client.post(URL, json={"amount_cents": amount})
+    response = client.post(URL, json={"amount_cents": amount}, headers=vend_headers())
     assert response.status_code == 201
     assert response.json()["amount_cents"] == amount
 
 
 @pytest.mark.parametrize("amount", [999, 500001, 0, -1000])
 def test_amounts_outside_the_limits_are_422(client: TestClient, amount: int) -> None:
-    response = client.post(URL, json={"amount_cents": amount})
+    response = client.post(URL, json={"amount_cents": amount}, headers=vend_headers())
     assert response.status_code == 422
     _assert_demo_header(response.headers)
     assert response.json()["detail"][0]["loc"] == ["body", "amount_cents"]
@@ -65,8 +66,8 @@ def test_unknown_fields_are_422(client: TestClient) -> None:
 
 
 def test_list_shows_recent_vouchers_with_masked_pins(client: TestClient) -> None:
-    first = client.post(URL, json={"amount_cents": 10000}).json()
-    second = client.post(URL, json={"amount_cents": 20000}).json()
+    first = client.post(URL, json={"amount_cents": 10000}, headers=vend_headers()).json()
+    second = client.post(URL, json={"amount_cents": 20000}, headers=vend_headers()).json()
 
     response = client.get(URL)
     assert response.status_code == 200
@@ -118,3 +119,65 @@ def test_demo_routes_absent_when_disabled(test_settings: Settings) -> None:
         assert "X-Demo-Surface" not in post.headers
         assert disabled.get(URL).status_code == 404
         assert not any(p.startswith("/demo") for p in disabled.get("/openapi.json").json()["paths"])
+
+
+# --- the same sale, sent twice ----------------------------------------------------------
+#
+# The till takes the cash before it calls this, so a request that times out
+# leaves the cashier unable to tell a voucher that exists from one that does
+# not. Retrying must return the first voucher, never vend a second.
+
+
+def test_a_repeated_sale_returns_the_first_voucher_and_vends_once(
+    client: TestClient, clean_db: Engine
+) -> None:
+    headers = vend_headers()
+
+    first = client.post(URL, json={"amount_cents": 50000}, headers=headers)
+    again = client.post(URL, json={"amount_cents": 50000}, headers=headers)
+
+    assert first.status_code == 201
+    # 200, not 201: this call created nothing.
+    assert again.status_code == 200
+    assert again.json() == first.json()
+    with clean_db.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM vouchers")).scalar_one() == 1
+
+
+def test_two_sales_of_the_same_amount_are_two_vouchers(
+    client: TestClient, clean_db: Engine
+) -> None:
+    # Only a repeated key is a repeat. Two real sales at R500 must both vend,
+    # or a till could never sell the same amount twice.
+    first = client.post(URL, json={"amount_cents": 50000}, headers=vend_headers())
+    second = client.post(URL, json={"amount_cents": 50000}, headers=vend_headers())
+
+    assert (first.status_code, second.status_code) == (201, 201)
+    assert first.json()["pin"] != second.json()["pin"]
+    with clean_db.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM vouchers")).scalar_one() == 2
+
+
+def test_a_replay_reports_the_amount_that_was_vended(client: TestClient) -> None:
+    # If a retry carries a different amount, the first sale is what happened.
+    # The slip must show the voucher that exists, not the second request.
+    headers = vend_headers()
+    first = client.post(URL, json={"amount_cents": 10000}, headers=headers).json()
+    replay = client.post(URL, json={"amount_cents": 50000}, headers=headers)
+
+    assert replay.status_code == 200
+    assert replay.json()["amount_cents"] == 10000
+    assert replay.json()["pin"] == first["pin"]
+
+
+@pytest.mark.parametrize("headers", [{}, {"Idempotency-Key": ""}, {"Idempotency-Key": "not-a-uuid"}])
+def test_a_sale_without_a_usable_key_is_refused(
+    client: TestClient, clean_db: Engine, headers: dict[str, str]
+) -> None:
+    # Refused rather than vended: whether the shop pays for a second voucher
+    # must not depend on the client remembering to send a key.
+    response = client.post(URL, json={"amount_cents": 50000}, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["detail"][0]["loc"] == ["header", "Idempotency-Key"]
+    with clean_db.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM vouchers")).scalar_one() == 0

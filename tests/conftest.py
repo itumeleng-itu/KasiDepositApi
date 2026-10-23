@@ -37,6 +37,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # A fixed key for the test run only; never used outside TEST_SCHEMA.
 TEST_PII_KEY = "test-only-pii-key-0123456789abcdef-not-secret"
 
+
+def vend_headers(**extra: str) -> dict[str, str]:
+    """Headers for a POST /demo/vouchers that should succeed.
+
+    The route requires an Idempotency-Key (app/routes/demo.py). A fresh one
+    per call is what a till does per sale; a test that wants a replay passes
+    the same key twice itself.
+    """
+    return {"Idempotency-Key": str(uuid.uuid4()), **extra}
+
 # A valid adult SA ID whose sequence digits (5009) the mock verifier accepts.
 REGISTRATION = {"full_names": "Thabo Mokoena", "id_number": "8001015009087"}
 
