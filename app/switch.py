@@ -33,6 +33,8 @@ MAX_VEND_ATTEMPTS = 5
 
 # The constraints that make a freshly generated PIN or serial a collision.
 _COLLISION_CONSTRAINTS = frozenset({"pk_vouchers", "uq_vouchers_serial"})
+# A repeat of a sale the caller already made, not a generated collision.
+_IDEMPOTENCY_CONSTRAINT = "uq_vouchers_idempotency_key"
 
 
 def _random_digits(count: int) -> str:
@@ -67,6 +69,10 @@ class VendedVoucher:
     serial: str
     amount_cents: Cents
     issued_at: datetime
+    # False when this call issued the voucher; True when the caller's
+    # idempotency key matched a sale already made and this is that voucher
+    # being reported again. The till shows the same slip either way.
+    replayed: bool = False
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,7 @@ class VoucherInfo:
     pin: str
     amount_cents: Cents
     status: VoucherStatus
+    issued_at: datetime  # when it was vended; deposit risk reads the gap (app/risk.py)
 
 
 @dataclass(frozen=True)
@@ -137,12 +144,25 @@ class VoucherSwitch:
         self.min_voucher_cents = min_voucher_cents
         self.max_voucher_cents = max_voucher_cents
 
-    def vend(self, session: Session, amount_cents: Cents) -> VendedVoucher:
+    def vend(
+        self, session: Session, amount_cents: Cents, idempotency_key: str | None = None
+    ) -> VendedVoucher:
         """Issue a new active voucher for `amount_cents`.
 
         The unique constraints are the authority on collisions — there is no
         SELECT-then-INSERT, which would race. Each attempt runs in a savepoint
         so a collision rolls back only that attempt, not the caller's work.
+
+        `idempotency_key` makes a repeat of the same sale safe. The till takes
+        the cash before it calls this, so a request that times out leaves the
+        cashier unable to tell a voucher that exists from one that does not —
+        and vending again would cost the shop a second voucher. With a key,
+        the retry returns the voucher the first call issued, `replayed=True`.
+
+        The key is only ever checked by its unique constraint, never by
+        reading first: two taps racing on one key must not both insert, and
+        only the constraint can promise that. The loser of the race sees the
+        violation, rolls back its savepoint, and reads the winner's row.
         """
         if isinstance(amount_cents, bool) or not isinstance(amount_cents, int):
             raise TypeError(f"amount_cents must be an int, got {type(amount_cents).__name__}")
@@ -155,6 +175,7 @@ class VoucherSwitch:
                 serial=generate_serial(),
                 amount_cents=amount_cents,
                 status=VoucherStatus.ACTIVE,
+                idempotency_key=idempotency_key,
             )
             try:
                 with session.begin_nested():
@@ -162,6 +183,8 @@ class VoucherSwitch:
             except IntegrityError as exc:
                 if _is_collision(exc):
                     continue
+                if idempotency_key is not None and _is_replay(exc):
+                    return self._replay(session, idempotency_key)
                 raise
             return VendedVoucher(
                 pin=voucher.pin,
@@ -170,6 +193,27 @@ class VoucherSwitch:
                 issued_at=voucher.issued_at,
             )
         raise VendFailed(f"no unique PIN after {MAX_VEND_ATTEMPTS} attempts")
+
+    def _replay(self, session: Session, idempotency_key: str) -> VendedVoucher:
+        """The voucher a previous call issued under this key.
+
+        Reports the voucher as it stands, including its amount: if the caller
+        retries one key with a different amount, the first sale is what
+        happened and the amount on the slip must be the amount vended, not
+        the amount asked for second.
+        """
+        voucher = session.scalar(
+            select(Voucher).where(Voucher.idempotency_key == idempotency_key)
+        )
+        if voucher is None:  # cannot happen: the constraint just rejected this key
+            raise VendFailed(f"idempotency key {idempotency_key} collided but has no voucher")
+        return VendedVoucher(
+            pin=voucher.pin,
+            serial=voucher.serial,
+            amount_cents=voucher.amount_cents,
+            issued_at=voucher.issued_at,
+            replayed=True,
+        )
 
     def recent(self, session: Session, limit: int = 50) -> list[VoucherSummary]:
         """Most recently issued vouchers, newest first, PINs masked.
@@ -198,7 +242,12 @@ class VoucherSwitch:
         voucher = session.scalar(select(Voucher).where(Voucher.pin == pin))
         if voucher is None:
             raise VoucherNotFound(pin)
-        return VoucherInfo(pin=voucher.pin, amount_cents=voucher.amount_cents, status=voucher.status)
+        return VoucherInfo(
+            pin=voucher.pin,
+            amount_cents=voucher.amount_cents,
+            status=voucher.status,
+            issued_at=voucher.issued_at,
+        )
 
     def charge(self, session: Session, pin: str) -> ChargeResult:
         """Redeem a voucher for its full amount. Single-use: there is no amount.
@@ -240,6 +289,16 @@ class VoucherSwitch:
         session.expire(voucher)
         return ChargeResult(pin=pin, amount_cents=amount_cents, redeemed_at=redeemed_at)
 
+    def hold(self, session: Session, pin: str) -> None:
+        """Take the voucher's row lock and change nothing.
+
+        For a caller that must check its own rows before deciding to reverse
+        a charge: it holds the voucher first, then locks the deposit, which
+        keeps the lock order of `charge` (voucher row before deposit row) so
+        the two can never deadlock. Released when the transaction ends.
+        """
+        session.execute(select(Voucher.pin).where(Voucher.pin == pin).with_for_update())
+
     def reverse_charge(self, session: Session, pin: str) -> None:
         """Undo a charge: return a redeemed voucher to active, so it can be used again.
 
@@ -270,4 +329,11 @@ def _is_collision(exc: IntegrityError) -> bool:
     return (
         isinstance(exc.orig, UniqueViolation)
         and exc.orig.diag.constraint_name in _COLLISION_CONSTRAINTS
+    )
+
+
+def _is_replay(exc: IntegrityError) -> bool:
+    return (
+        isinstance(exc.orig, UniqueViolation)
+        and exc.orig.diag.constraint_name == _IDEMPOTENCY_CONSTRAINT
     )

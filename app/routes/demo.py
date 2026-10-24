@@ -2,9 +2,11 @@
 
 These endpoints stand in for the till at the spaza shop that takes cash and
 prints a PIN. In the real product that terminal belongs to the issuer, not to
-us. They also let the demo operator top up and inspect the float, and keep the
+us. They also let the demo operator top up and inspect the float, keep the
 demo PayShap directory (/demo/shapids): the numbers that resolve to a real
-name and bank in the demo, since we have no connection to PayShap itself.
+name and bank in the demo, since we have no connection to PayShap itself, and
+force a deposit risk band for a few minutes (/demo/risk), so the warn and
+review behaviour can be shown without building up a real pattern.
 
 - They must never be exposed to, or called by, the mobile app. The app only
   ever redeems; it can never vend.
@@ -20,10 +22,12 @@ name and bank in the demo, since we have no connection to PayShap itself.
 """
 
 import secrets
+import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -33,6 +37,8 @@ from app.db import get_session
 from app.ledger import available_float, balance_of, fund_float
 from app.models import DemoShapId, LedgerAccount
 from app.schemas.demo_shapid import AddDemoShapIdRequest, DemoShapIdResponse, normalise_number
+from app.risk import Band, RiskOverride
+from app.schemas.demo_risk import ForcedRiskResponse, ForceRiskRequest
 from app.schemas.float import FloatResponse, FundFloatRequest
 from app.schemas.voucher import VendRequest, VendResponse, VoucherListItem
 from app.switch import AmountOutOfRange, VoucherSwitch
@@ -55,9 +61,40 @@ SwitchDep = Annotated[VoucherSwitch, Depends(get_switch)]
 
 
 @router.post("/vouchers", status_code=status.HTTP_201_CREATED)
-def vend_voucher(body: VendRequest, session: SessionDep, switch: SwitchDep) -> VendResponse:
+def vend_voucher(
+    body: VendRequest,
+    response: Response,
+    session: SessionDep,
+    switch: SwitchDep,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> VendResponse:
+    """Vend one voucher. `Idempotency-Key` is required, as on /v1/deposits.
+
+    Required rather than optional because the cash is already in the till by
+    the time this is called: a client that retries without a key buys the
+    shop a second voucher, and whether that happens must not be left to the
+    client remembering. A UUID, so one till cannot guess another's keys.
+    """
+    if not idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=[{"type": "missing", "loc": ["header", "Idempotency-Key"], "msg": "required"}],
+        )
     try:
-        vended = switch.vend(session, body.amount_cents)
+        uuid.UUID(idempotency_key)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=[
+                {
+                    "type": "uuid_parsing",
+                    "loc": ["header", "Idempotency-Key"],
+                    "msg": "must be a UUID",
+                }
+            ],
+        ) from None
+    try:
+        vended = switch.vend(session, body.amount_cents, idempotency_key)
     except AmountOutOfRange as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -72,6 +109,9 @@ def vend_voucher(body: VendRequest, session: SessionDep, switch: SwitchDep) -> V
             ],
         ) from exc
     session.commit()
+    # 200 rather than 201 on a replay: nothing was created by this call.
+    if vended.replayed:
+        response.status_code = status.HTTP_200_OK
     return VendResponse.from_vended(vended)
 
 
@@ -137,6 +177,47 @@ def remove_demo_shapid(number: str, session: SessionDep) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     session.delete(entry)
     session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _override(request: Request) -> RiskOverride:
+    override: RiskOverride = request.app.state.risk_override
+    return override
+
+
+def _forced(override: RiskOverride) -> ForcedRiskResponse:
+    current = override.current(datetime.now(UTC))
+    if current is None:
+        return ForcedRiskResponse(band=None, expires_at=None)
+    band, until = current
+    return ForcedRiskResponse(band=band.value, expires_at=until)  # type: ignore[arg-type]
+
+
+@router.get("/risk")
+def get_forced_risk(request: Request) -> ForcedRiskResponse:
+    """The forced risk band, if one is on."""
+    return _forced(_override(request))
+
+
+@router.post("/risk")
+def force_risk(body: ForceRiskRequest, request: Request) -> ForcedRiskResponse:
+    """Every deposit gets this band until it expires or is cleared. In
+    process memory: it applies to the one instance that served this call."""
+    settings: Settings = request.app.state.settings
+    if body.minutes > settings.risk_demo_force_max_minutes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"minutes must be at most {settings.risk_demo_force_max_minutes}",
+        )
+    override = _override(request)
+    override.force(Band(body.band), datetime.now(UTC) + timedelta(minutes=body.minutes))
+    return _forced(override)
+
+
+@router.delete("/risk", status_code=status.HTTP_204_NO_CONTENT)
+def clear_forced_risk(request: Request) -> Response:
+    """Back to real scoring."""
+    _override(request).clear()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

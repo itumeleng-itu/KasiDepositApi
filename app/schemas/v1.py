@@ -53,6 +53,9 @@ class CreateDepositRequest(BaseModel):
     # destination resolved on the spot (the older shape, kept for tools).
     payout_method_id: str | None = None
     destination: dict[str, Any] | None = None
+    # True only after the app has shown its confirmation interstitial in
+    # answer to confirmation_required. It never overrides deposit_declined.
+    risk_acknowledged: bool = False
     # No amount, deliberately: the backend reads it from the voucher row.
 
 

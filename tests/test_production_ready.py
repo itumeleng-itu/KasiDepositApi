@@ -16,7 +16,7 @@ from app.db import make_engine
 from app.log_redaction import RedactShapIds
 from app.main import create_app
 from app.schema_check import SchemaNotCurrent, check_schema_is_current
-from tests.conftest import assert_ledger_balanced
+from tests.conftest import assert_ledger_balanced, vend_headers
 
 KEY = "a-demo-key-that-is-long-enough-000000"
 KEYED = {"X-Demo-Key": KEY}
@@ -56,7 +56,7 @@ def test_without_the_key_demo_looks_like_it_does_not_exist(keyed_api: TestClient
 
 
 def test_with_the_key_demo_works(keyed_api: TestClient) -> None:
-    response = keyed_api.post("/demo/vouchers", json={"amount_cents": 50000}, headers=KEYED)
+    response = keyed_api.post("/demo/vouchers", json={"amount_cents": 50000}, headers=vend_headers(**KEYED))
     assert response.status_code == 201
     assert response.headers["X-Demo-Surface"] == "true"
     assert keyed_api.get("/demo/vouchers", headers=KEYED).status_code == 200
@@ -131,6 +131,8 @@ def test_sql_errors_do_not_carry_their_parameters(engine: Engine) -> None:
     [
         ("/v1/shapid/%2B27821234567", "/v1/shapid/***"),
         ("/v1/shapid/%2B27821234567%40fnb", "/v1/shapid/***"),
+        ("/demo/shapids/0821234567", "/demo/shapids/***"),
+        ("/demo/shapids", "/demo/shapids"),
         ("/v1/deposits/abc", "/v1/deposits/abc"),
     ],
 )

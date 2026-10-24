@@ -13,6 +13,7 @@ from sqlalchemy import Engine
 from app.config import Settings
 from app.main import create_app
 from app.routes.till import TILL_PAGE
+from tests.conftest import vend_headers
 
 KEY = "a-till-code-that-is-long-enough-00000000"
 
@@ -32,6 +33,20 @@ def test_the_till_page_is_served_without_the_key(till_api: TestClient) -> None:
     page = response.text
     for expected in ("KasiDeposit Till", "Sell a voucher", "Manager", "/demo/vouchers", "/demo/float", "X-Demo-Key"):
         assert expected in page
+
+
+def test_the_page_sends_a_key_per_sale_and_never_claims_a_failed_sale_was_not_made(
+    till_api: TestClient,
+) -> None:
+    # The till takes the cash before it vends, so it must send an
+    # Idempotency-Key (the route requires one) and must not tell the cashier
+    # a voucher was not created when it never got an answer.
+    page = till_api.get("/till").text
+    assert "Idempotency-Key" in page
+    assert "Did that sale go through?" in page
+    # The old copy asserted an outcome the till cannot know.
+    assert "No voucher was created." in page  # kept, but only for a refusal
+    assert "we cannot say whether" in page
 
 
 def test_the_page_holds_no_secret(till_api: TestClient) -> None:
@@ -61,7 +76,7 @@ def test_what_the_page_does_needs_the_code(till_api: TestClient) -> None:
     without it they are refused as if /demo did not exist."""
     sale = {"amount_cents": 50000}
     assert till_api.post("/demo/vouchers", json=sale).status_code == 404
-    sold = till_api.post("/demo/vouchers", json=sale, headers={"X-Demo-Key": KEY})
+    sold = till_api.post("/demo/vouchers", json=sale, headers=vend_headers(**{"X-Demo-Key": KEY}))
     assert sold.status_code == 201
     body = sold.json()
     assert {"pin", "serial", "amount_display", "issued_at"} <= set(body)  # what the slip shows
@@ -76,7 +91,7 @@ def test_recent_sales_find_a_sold_voucher_without_its_pin(till_api: TestClient) 
     """What the Recent sales screen shows: the voucher just sold, found by its
     serial, with the PIN masked to its last 4 digits."""
     assert till_api.get("/demo/vouchers").status_code == 404
-    sold = till_api.post("/demo/vouchers", json={"amount_cents": 20000}, headers={"X-Demo-Key": KEY}).json()
+    sold = till_api.post("/demo/vouchers", json={"amount_cents": 20000}, headers=vend_headers(**{"X-Demo-Key": KEY})).json()
     recent = till_api.get("/demo/vouchers", headers={"X-Demo-Key": KEY})
     assert recent.status_code == 200
     [row] = [v for v in recent.json() if v["serial"] == sold["serial"]]

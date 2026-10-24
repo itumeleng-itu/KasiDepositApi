@@ -19,7 +19,7 @@ from app.models import Deposit, User, UserSession
 from app.payouts import MockPayoutProvider, PayoutRef, ProviderStatus
 from app.pii import ACCOUNT_NUMBER, SA_ID, PiiCipher
 from app.switch import VoucherSwitch
-from tests.conftest import REGISTRATION, TEST_PII_KEY, register
+from tests.conftest import REGISTRATION, TEST_PII_KEY, register, sign_in
 
 ID_NUMBER = REGISTRATION["id_number"]
 ACCOUNT = "1234564417"
@@ -154,12 +154,16 @@ def test_protected_routes_need_a_valid_token(api: TestClient, header: str | None
         ("post", "/v1/deposits"),
         ("get", f"/v1/deposits/{uuid.uuid4()}"),
         ("get", "/v1/me/deposits"),
+        ("get", "/v1/shapid/%2B27821234560"),
     ]:
         response = api.request(method.upper(), path, json={}, headers=headers)
         assert (response.status_code, response.json()) == (401, {"reason": "not_registered"}), path
 
 
-def test_shapid_lookup_and_registering_need_no_token(api: TestClient) -> None:
+def test_the_shapid_lookup_needs_a_token(api: TestClient) -> None:
+    # A directory read: open, it would tell anyone who banks where.
+    assert api.get("/v1/shapid/%2B27821234560").status_code == 401
+    sign_in(api)
     assert api.get("/v1/shapid/%2B27821234560").status_code == 200
 
 

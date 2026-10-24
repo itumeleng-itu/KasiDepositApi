@@ -19,7 +19,7 @@ from app.ledger import balance_of, fund_float
 from app.main import create_app
 from app.models import LedgerAccount, Voucher, VoucherStatus
 from app.payouts import COMPLETED_AFTER_SECONDS, MockPayoutProvider
-from tests.conftest import assert_ledger_balanced, sign_in
+from tests.conftest import assert_ledger_balanced, sign_in, vend_headers
 
 FLOAT = 1_000_000  # R10 000
 
@@ -50,7 +50,7 @@ def test_vend_lookup_deposit_poll_settled(api: TestClient, clean_db: Engine, clo
         session.commit()
 
     # The spaza's till vends a R500 voucher.
-    vended = api.post("/demo/vouchers", json={"amount_cents": 50000})
+    vended = api.post("/demo/vouchers", json={"amount_cents": 50000}, headers=vend_headers())
     assert vended.status_code == 201
     pin = vended.json()["pin"]
 

@@ -4,7 +4,8 @@ Matches the app's src/api/wire.ts exactly (the app is the source of truth):
 
     POST /v1/vouchers/lookup   {pin}                          -> voucher lookup
     GET  /v1/shapid/{shap_id}  (URL-encoded: + and @ survive) -> resolved ShapID
-    POST /v1/deposits          {voucher_token, destination}   -> deposit
+    POST /v1/deposits          {voucher_token, payout_method_id | destination,
+                                risk_acknowledged?}           -> deposit
                                Idempotency-Key header required
     GET  /v1/deposits/{id}                                    -> deposit
     POST /v1/users             {full_names, id_number}        -> registered user
@@ -15,12 +16,21 @@ Matches the app's src/api/wire.ts exactly (the app is the source of truth):
     POST /v1/me/payout-methods/{id}/default                   -> {payout_methods: [...]}
     DELETE /v1/me/payout-methods/{id}                         -> {payout_methods: [...]}
 
-Every route except POST /v1/users and GET /v1/shapid needs
-`Authorization: Bearer <access_token>`; without a valid one it is 401
-{"reason": "not_registered"} (app/users.py). A deposit is visible only to the
-user who made it.
+Every route except POST /v1/users needs `Authorization: Bearer <access_token>`;
+without a valid one it is 401 {"reason": "not_registered"} (app/users.py). A
+deposit is visible only to the user who made it.
+
+Four routes are rate limited (app/rate_limit.py): the ShapID read and
+registration per client IP, voucher lookup and deposit status per access
+token. Over the limit is 429 {"reason": "rate_limited"} with Retry-After, and
+no remaining-quota headers anywhere.
 
 No endpoint here accepts an amount: the backend reads it from the voucher row.
+
+A deposit is risk-assessed before anything is charged (app/risk.py). Two
+refusals come of it, and neither says why: 409 confirmation_required (the app
+shows its interstitial, then resends with the same Idempotency-Key and
+"risk_acknowledged": true) and 403 deposit_declined.
 
 Every refusal is `{"reason": "<string>"}`. The strings are exactly the app's
 FailureReason values, because the app maps them to what the user reads; the
@@ -52,6 +62,8 @@ from app.schemas.v1 import (
     PayoutMethodResponse,
 )
 from app.payout_methods import PayoutMethodService
+from app.risk import CONFIRMATION_REQUIRED, DEPOSIT_DECLINED
+from app.rate_limit import RateLimited, RateLimiter, client_ip, ip_key, token_key
 from app.shapid import ShapIdError, demo_directory, resolve
 from app.users import UserService
 
@@ -84,6 +96,9 @@ REASON_STATUS: dict[str, int] = {
     "account_holder_mismatch": status.HTTP_409_CONFLICT,
     "payout_method_limit": status.HTTP_409_CONFLICT,
     "payout_method_not_found": status.HTTP_404_NOT_FOUND,
+    "rate_limited": status.HTTP_429_TOO_MANY_REQUESTS,
+    CONFIRMATION_REQUIRED: status.HTTP_409_CONFLICT,
+    DEPOSIT_DECLINED: status.HTTP_403_FORBIDDEN,
 }
 
 
@@ -119,7 +134,47 @@ def current_user(
 UserIdDep = Annotated[uuid.UUID, Depends(current_user)]
 
 
-@router.post("/users", status_code=status.HTTP_201_CREATED)
+def get_limiter(request: Request) -> RateLimiter:
+    limiter: RateLimiter = request.app.state.rate_limiter
+    return limiter
+
+
+LimiterDep = Annotated[RateLimiter, Depends(get_limiter)]
+
+
+# Per-IP limits run before authentication (they sit in the route's
+# `dependencies`, which FastAPI solves first), so they hold with or without a token.
+def limit_shapid_by_ip(request: Request, limiter: LimiterDep) -> None:
+    ip = client_ip(request, limiter.trusted_proxy_hops)
+    limiter.hit(ip_key("shapid", ip), limiter.limits.shapid)
+
+
+def limit_register_by_ip(request: Request, limiter: LimiterDep) -> None:
+    ip = client_ip(request, limiter.trusted_proxy_hops)
+    limiter.hit(ip_key("register", ip), limiter.limits.register)
+
+
+# Per-token limits depend on current_user, so they run only after the token
+# has been accepted: a made-up token is a 401 and never becomes a key.
+def limit_lookup_by_token(
+    _user_id: UserIdDep,
+    limiter: LimiterDep,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    limiter.hit(token_key("lookup", authorization), limiter.limits.lookup)
+
+
+def limit_deposit_status_by_token(
+    _user_id: UserIdDep,
+    limiter: LimiterDep,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    limiter.hit(token_key("deposit_status", authorization), limiter.limits.deposit_status)
+
+
+@router.post(
+    "/users", status_code=status.HTTP_201_CREATED, dependencies=[Depends(limit_register_by_ip)]
+)
 def register_user(
     body: RegisterRequest, response: Response, session: SessionDep, users: UsersDep
 ) -> RegisterResponse:
@@ -198,15 +253,15 @@ def list_my_deposits(
     return DepositHistoryResponse(deposits=[DepositRecordResponse.of(r) for r in records])
 
 
-@router.post("/vouchers/lookup")
+@router.post("/vouchers/lookup", dependencies=[Depends(limit_lookup_by_token)])
 def lookup_voucher(
     body: LookupRequest, session: SessionDep, deposits: DepositsDep, _user_id: UserIdDep
 ) -> LookupResponse:
     return LookupResponse.of(deposits.lookup_voucher(session, body.pin))
 
 
-@router.get("/shapid/{shap_id}")
-def resolve_shap_id(shap_id: str, session: SessionDep) -> ShapIdResponse:
+@router.get("/shapid/{shap_id}", dependencies=[Depends(limit_shapid_by_ip)])
+def resolve_shap_id(shap_id: str, session: SessionDep, _user_id: UserIdDep) -> ShapIdResponse:
     try:
         resolved = resolve(shap_id, demo_directory(session))
     except ShapIdError as exc:
@@ -235,11 +290,22 @@ def create_deposit(
     if body.payout_method_id is not None:
         stored = methods.destination_for_deposit(session, user_id, _method_id(body.payout_method_id))
         view, created = deposits.create_deposit_to(
-            session, body.voucher_token, stored, idempotency_key, user_id
+            session,
+            body.voucher_token,
+            stored.destination,
+            idempotency_key,
+            user_id,
+            destination_added_at=stored.added_at,
+            risk_acknowledged=body.risk_acknowledged,
         )
     elif body.destination is not None:
         view, created = deposits.create_deposit(
-            session, body.voucher_token, body.destination, idempotency_key, user_id
+            session,
+            body.voucher_token,
+            body.destination,
+            idempotency_key,
+            user_id,
+            risk_acknowledged=body.risk_acknowledged,
         )
     else:
         raise Refused("invalid_destination")
@@ -247,7 +313,7 @@ def create_deposit(
     return DepositResponse.of(view)
 
 
-@router.get("/deposits/{deposit_id}")
+@router.get("/deposits/{deposit_id}", dependencies=[Depends(limit_deposit_status_by_token)])
 def get_deposit(
     deposit_id: str, session: SessionDep, deposits: DepositsDep, user_id: UserIdDep
 ) -> DepositResponse:
@@ -260,7 +326,8 @@ def get_deposit(
 
 async def _refused(_request: Request, exc: Exception) -> JSONResponse:
     reason = exc.reason if isinstance(exc, Refused) else "unknown"
-    return JSONResponse({"reason": reason}, status_code=REASON_STATUS.get(reason, 400))
+    headers = {"Retry-After": str(exc.retry_after_seconds)} if isinstance(exc, RateLimited) else None
+    return JSONResponse({"reason": reason}, status_code=REASON_STATUS.get(reason, 400), headers=headers)
 
 
 def mount(app: FastAPI) -> None:

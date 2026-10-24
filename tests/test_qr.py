@@ -7,6 +7,7 @@ import segno
 from fastapi.testclient import TestClient
 
 from app.qr import voucher_payload, voucher_qr_svg
+from tests.conftest import vend_headers
 
 
 def test_the_payload_is_a_kasideposit_redeem_link() -> None:
@@ -46,7 +47,7 @@ def test_each_pin_gets_its_own_qr() -> None:
 
 
 def test_vending_returns_the_qr_for_the_new_pin(client: TestClient) -> None:
-    body = client.post("/demo/vouchers", json={"amount_cents": 50000}).json()
+    body = client.post("/demo/vouchers", json={"amount_cents": 50000}, headers=vend_headers()).json()
     assert body["qr_payload"] == f"kasideposit://redeem?pin={body['pin']}"
     assert body["qr_svg"] == voucher_qr_svg(body["pin"])
 

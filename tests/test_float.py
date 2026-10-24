@@ -104,7 +104,7 @@ def test_a_payout_the_float_cannot_cover_is_refused_before_charging(
 
 
 def test_a_payout_exactly_equal_to_the_float_is_allowed(clean_db: Engine, switch: VoucherSwitch) -> None:
-    (pin,) = _setup(clean_db, switch, 49_500, 50000)
+    (pin,) = _setup(clean_db, switch, 48_750, 50000)  # exactly R487.50
     with make_session_factory(clean_db)() as session:
         _charge_with_float_check(session, switch, pin, "KD-FLTAAA")
         session.commit()

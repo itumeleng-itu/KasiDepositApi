@@ -139,6 +139,26 @@
     <p class="muted" id="working-hint" hidden>The server is waking up. This can take up to a minute.</p>
   </section>
 
+  <!-- The sale we cannot account for. The request may have reached the
+       server and made a voucher before the connection died, so claiming
+       nothing happened would be a guess, and the cash is already in the
+       till. "Try again" reuses this sale's key, so it returns the voucher
+       that exists instead of vending a second one. -->
+  <section id="unsure" class="panel" hidden aria-live="polite">
+    <h2>Did that sale go through?</h2>
+    <p class="big" id="unsure-amount"></p>
+    <p>We could not get an answer from the server, so we cannot say whether
+      this voucher was made. Do not sell it again on a new sale.</p>
+    <p class="muted" id="unsure-why"></p>
+    <div class="row">
+      <button type="button" class="primary" id="unsure-retry">Try this sale again</button>
+    </div>
+    <div class="row">
+      <button type="button" class="secondary" id="unsure-recent">Check recent sales</button>
+    </div>
+    <div id="unsure-error" class="error" role="alert" hidden></div>
+  </section>
+
   <!-- The slip. -->
   <section id="slip" class="panel slip" hidden aria-live="polite">
     <h2>KasiDeposit voucher</h2>
@@ -246,7 +266,19 @@ const CODE_KEY = "kasideposit.tillCode";
 const REQUEST_TIMEOUT_MS = 75000; // the free server can take ~60 s to wake
 
 const $ = (id) => document.getElementById(id);
-const screens = ["setup", "sell", "confirm", "working", "slip", "recent", "enquiry", "manager"];
+const screens = ["setup", "sell", "confirm", "working", "unsure", "slip", "recent", "enquiry", "manager"];
+
+/* A key per sale, so retrying one sale can never vend twice. crypto.randomUUID
+   needs a secure context; over plain http on a shop's LAN it is absent, so
+   fall back to random bytes in the same shape. */
+function newSaleKey() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const hex = [...b].map((n) => n.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 
 function show(name) {
   for (const s of screens) $(s).hidden = s !== name;
@@ -327,9 +359,14 @@ function showQr(svgText) {
 
 class TillError extends Error {}
 class WrongCode extends TillError {}
+/* The server answered and declined. Distinct from a request that never got
+   an answer, because only this case proves no voucher was vended. */
+class ServerRefused extends TillError {}
 
-/* One request to /demo with the till code. Slow responses show a hint. */
-async function demoRequest(method, path, body) {
+/* One request to /demo with the till code. Slow responses show a hint.
+   `key`, when given, is this sale's Idempotency-Key: the server returns the
+   voucher already issued under it rather than vending a second one. */
+async function demoRequest(method, path, body, key) {
   const code = getCode();
   if (!code) throw new WrongCode("No till code on this device.");
   const controller = new AbortController();
@@ -339,7 +376,11 @@ async function demoRequest(method, path, body) {
   try {
     response = await fetch(path, {
       method,
-      headers: { "X-Demo-Key": code, ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: {
+        "X-Demo-Key": code,
+        ...(key ? { "Idempotency-Key": key } : {}),
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
       body: body ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
@@ -351,8 +392,13 @@ async function demoRequest(method, path, body) {
     $("working-hint").hidden = true;
   }
   if (response.status === 404) throw new WrongCode("The till code is not right.");
-  if (response.status === 422) throw new TillError(`The amount must be between ${formatRand(MIN_CENTS)} and ${formatRand(MAX_CENTS)}.`);
-  if (!response.ok) throw new TillError("Something went wrong on the server. Try again.");
+  // 4xx: the server looked at the request and declined it. Nothing was
+  // vended, and the cashier can be told so without guessing.
+  if (response.status === 422) throw new ServerRefused(`The amount must be between ${formatRand(MIN_CENTS)} and ${formatRand(MAX_CENTS)}.`);
+  if (response.status === 400) throw new ServerRefused("The till sent something the server could not read.");
+  // 5xx and anything else: the request may have been applied before it
+  // failed. Plain TillError, so the caller treats the sale as unsettled.
+  if (!response.ok) throw new TillError("The server had a problem answering.");
   return response.json();
 }
 
@@ -405,25 +451,73 @@ $("other-form").addEventListener("submit", (event) => {
 });
 $("confirm-no").addEventListener("click", () => { pendingCents = null; show("sell"); });
 
-$("confirm-yes").addEventListener("click", async () => {
-  if (pendingCents === null) return;
-  const cents = pendingCents;
-  pendingCents = null; // one tap, one voucher
+/* The sale being attempted: its amount and its idempotency key. The key
+   outlives a failed attempt so "Try again" is the same sale, not a new one. */
+let attempt = null;
+
+function showSlip(voucher) {
+  $("slip-amount").textContent = voucher.amount_display;
+  $("slip-pin").textContent = groupPin(voucher.pin);
+  showQr(voucher.qr_svg);
+  $("slip-serial").textContent = voucher.serial;
+  $("slip-time").textContent = formatWhen(voucher.issued_at);
+  $("other").value = "";
+  show("slip");
+}
+
+/* Send the current attempt. Only an answer from the server settles it:
+   - a voucher back (new or replayed) -> the slip, and the attempt is done;
+   - a refusal the server chose (bad amount, wrong code) -> nothing was
+     vended, so it is safe to say so;
+   - no answer at all -> we do not know, so say that and keep the key. */
+async function sendAttempt(errorPanel) {
   show("working"); $("working-text").textContent = "Creating voucher…";
   try {
-    const voucher = await demoRequest("POST", "/demo/vouchers", { amount_cents: cents });
-    $("slip-amount").textContent = voucher.amount_display;
-    $("slip-pin").textContent = groupPin(voucher.pin);
-    showQr(voucher.qr_svg);
-    $("slip-serial").textContent = voucher.serial;
-    $("slip-time").textContent = formatWhen(voucher.issued_at);
-    $("other").value = "";
-    show("slip");
+    const voucher = await demoRequest(
+      "POST", "/demo/vouchers", { amount_cents: attempt.cents }, attempt.key
+    );
+    attempt = null;
+    showSlip(voucher);
   } catch (err) {
-    if (err instanceof WrongCode) { forgetCode(); show("setup"); setError("setup-error", "The till code is not right any more. Enter it again."); return; }
-    show("sell");
-    setError("sell-error", `${err.message} No voucher was created.`);
+    if (err instanceof WrongCode) {
+      forgetCode(); show("setup");
+      setError("setup-error", "The till code is not right any more. Enter it again.");
+      return;
+    }
+    if (err instanceof ServerRefused) {
+      // The server answered and declined: no voucher exists.
+      attempt = null;
+      show("sell");
+      setError("sell-error", `${err.message} No voucher was created.`);
+      return;
+    }
+    // Unreachable, aborted, or a server error we cannot interpret: the
+    // voucher may or may not exist. Never guess at a till.
+    $("unsure-amount").textContent = formatRand(attempt.cents);
+    $("unsure-why").textContent = err.message;
+    setError(errorPanel, "");
+    show("unsure");
   }
+}
+
+$("confirm-yes").addEventListener("click", async () => {
+  if (pendingCents === null) return;
+  attempt = { cents: pendingCents, key: newSaleKey() };
+  pendingCents = null; // one tap, one voucher
+  await sendAttempt("unsure-error");
+});
+
+$("unsure-retry").addEventListener("click", async () => {
+  if (attempt === null) { show("sell"); return; }
+  await sendAttempt("unsure-error");
+});
+/* Straight to the list, with the amount already typed in: after a sale she
+   has no slip, so the amount and the time are all she has to recognise it
+   by. The attempt is kept, so she can still retry it from here. */
+$("unsure-recent").addEventListener("click", () => {
+  $("recent-search").value = "";
+  show("recent");
+  loadRecent();
 });
 
 $("print").addEventListener("click", () => window.print());
@@ -496,7 +590,9 @@ function showEnquiry(v) {
 $("to-recent").addEventListener("click", () => { $("recent-search").value = ""; show("recent"); loadRecent(); });
 $("recent-search").addEventListener("input", renderRecent);
 $("recent-refresh").addEventListener("click", loadRecent);
-$("recent-back").addEventListener("click", () => show("sell"));
+/* An unsettled sale is not something to walk away from by accident: while
+   one is live, "Back" returns to it rather than to a fresh till. */
+$("recent-back").addEventListener("click", () => show(attempt === null ? "sell" : "unsure"));
 $("enq-back").addEventListener("click", () => show("recent"));
 $("enq-copy").addEventListener("click", async () => {
   if (!enquiryVoucher) return;

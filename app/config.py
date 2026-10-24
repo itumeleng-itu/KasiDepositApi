@@ -84,6 +84,77 @@ class Settings(BaseSettings):
     # register users or take account payouts, so nothing personal is ever
     # stored unencrypted. Losing it makes stored ciphertexts unrecoverable.
     pii_key: Annotated[str | None, Field(default=None, repr=False, min_length=32)]
+    # Rate limits on /v1 (app/rate_limit.py): N requests per window. Read at
+    # startup, so changing one in the Render dashboard takes effect on the
+    # restart that follows, with no code change or build.
+    # ShapID directory reads, per client IP.
+    rate_limit_shapid_requests: int = Field(default=10, gt=0)
+    rate_limit_shapid_window_seconds: int = Field(default=60, gt=0)
+    # Registrations, per client IP. Generous for one person, because mobile
+    # carriers put many phones behind one address (carrier-grade NAT).
+    rate_limit_register_requests: int = Field(default=20, gt=0)
+    rate_limit_register_window_seconds: int = Field(default=3600, gt=0)
+    # Voucher lookups, per access token: room for a few mistyped PINs.
+    rate_limit_lookup_requests: int = Field(default=10, gt=0)
+    rate_limit_lookup_window_seconds: int = Field(default=60, gt=0)
+    # Deposit status reads, per access token. The app polls at most once a
+    # second (src/polling.ts), 60 a minute, plus one each time it returns to
+    # the foreground; 120 leaves double that.
+    rate_limit_deposit_status_requests: int = Field(default=120, gt=0)
+    rate_limit_deposit_status_window_seconds: int = Field(default=60, gt=0)
+    # Deposit risk (app/risk.py). Off: every deposit is allowed unscored, a
+    # kill switch for a misbehaving rule that needs no deploy.
+    risk_enabled: bool = True
+    # Each signal that fires adds its weight to
+    # the score; the score picks the band. Defaults: one strong signal warns
+    # (the app asks the user to confirm), two together refuse.
+    risk_warn_score: int = Field(default=30, gt=0)
+    risk_review_score: int = Field(default=60, gt=0)
+    # How far back a user's own pattern is read.
+    risk_history_days: int = Field(default=30, ge=2, le=365)
+    # Velocity: deposits in the last hour (this one included) above this fires.
+    risk_velocity_hour_max: int = Field(default=3, gt=0)
+    # ...and in the last 24 hours, above the larger of this floor and this
+    # multiple of the user's own daily average over the rest of the history.
+    risk_velocity_day_floor: int = Field(default=5, gt=0)
+    risk_velocity_day_multiplier: float = Field(default=3.0, gt=1)
+    risk_weight_velocity_hour: int = Field(default=40, ge=0)
+    risk_weight_velocity_day: int = Field(default=30, ge=0)
+    # Novelty: a payout method first used within this many minutes of being
+    # added, by a user who has deposited elsewhere before.
+    risk_novelty_minutes: int = Field(default=10, gt=0)
+    risk_weight_novelty: int = Field(default=30, ge=0)
+    # Value: this many times the user's median deposit, once they have at
+    # least `risk_value_min_history` deposits to compare against.
+    risk_value_multiplier: float = Field(default=4.0, gt=1)
+    risk_value_min_history: int = Field(default=3, gt=0)
+    risk_weight_value: int = Field(default=30, ge=0)
+    # Redemption lag, from vend to deposit. Short is weak evidence (honest
+    # users often redeem at the till); long suggests a PIN that changed hands.
+    risk_lag_short_seconds: int = Field(default=30, ge=0)
+    risk_lag_long_hours: int = Field(default=72, gt=0)
+    risk_weight_lag_short: int = Field(default=10, ge=0)
+    risk_weight_lag_long: int = Field(default=30, ge=0)
+    # Destination churn: this many different destinations (this one
+    # included) within the window.
+    risk_churn_window_hours: int = Field(default=24, gt=0)
+    risk_churn_destinations: int = Field(default=3, ge=2)
+    risk_weight_churn: int = Field(default=40, ge=0)
+    # How many forced-band minutes the /demo/risk switch may ask for.
+    risk_demo_force_max_minutes: int = Field(default=60, gt=0)
+    # The payout worker (app/worker.py): advances deposits nobody is polling.
+    # Off by default, so development and the test suite are untouched.
+    payout_worker_enabled: bool = False
+    # How often it looks for in-flight deposits.
+    payout_worker_interval_seconds: float = Field(default=15.0, gt=0)
+    # Leave a deposit alone this long after its last change: the app is
+    # usually polling it then, and would advance it anyway.
+    payout_worker_min_age_seconds: int = Field(default=10, ge=0)
+    # At most this many deposits per pass.
+    payout_worker_batch_size: int = Field(default=50, gt=0, le=1000)
+    # How many proxies in front of us append to X-Forwarded-For: 1 on Render.
+    # 0 ignores the header and uses the socket peer (no proxy, e.g. locally).
+    trusted_proxy_hops: int = Field(default=1, ge=0, le=5)
 
     @field_validator("database_url")
     @classmethod
@@ -104,6 +175,8 @@ class Settings(BaseSettings):
             )
         if self.min_voucher_cents > self.max_voucher_cents:
             raise ValueError("MIN_VOUCHER_CENTS must not exceed MAX_VOUCHER_CENTS")
+        if self.risk_warn_score >= self.risk_review_score:
+            raise ValueError("RISK_WARN_SCORE must be below RISK_REVIEW_SCORE")
         return self
 
     @property
