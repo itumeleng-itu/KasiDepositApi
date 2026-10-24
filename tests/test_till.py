@@ -103,7 +103,10 @@ def test_recent_sales_find_a_sold_voucher_without_its_pin(till_api: TestClient) 
 
 # --- the page's money handling, run in Node ------------------------------------------
 
-_FUNCTIONS = ("randToCents", "formatRand", "groupPin", "matchesSearch", "statusText", "enquiryText")
+_FUNCTIONS = (
+    "randToCents", "formatRand", "groupPin", "matchesSearch", "statusText",
+    "outcomeText", "enquiryText",
+)
 
 
 def _page_functions() -> str:
@@ -146,6 +149,10 @@ def test_recent_sales_search_and_enquiry_text() -> None:
         "redeemed_at": "2026-09-26T14:10:00Z",
     }
     queries = ["", "2922", "4985 1613 9241 2922", "9711322", "2026-0926", "1234", "4985161392410000", "abc"]
+    # "abc" is now a miss, not a match. It used to be stripped to "" and hit
+    # the empty-query branch, so any letters-only search silently listed
+    # every voucher. With deposit references in the search that shape is a
+    # real query, and finding nothing must look like finding nothing.
     program = _page_functions() + (
         f"\nconst v = {json.dumps(voucher)};"
         f"\nconst queries = {json.dumps(queries)};"
@@ -156,7 +163,7 @@ def test_recent_sales_search_and_enquiry_text() -> None:
     )
     result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30, check=True)
     out = json.loads(result.stdout)
-    assert out["found"] == [True, True, True, True, True, False, False, True]
+    assert out["found"] == [True, True, True, True, True, False, False, False]
     assert out["text"] == (
         "KasiDeposit voucher enquiry\n"
         "Serial: 20260926053159711322\n"
@@ -166,3 +173,46 @@ def test_recent_sales_search_and_enquiry_text() -> None:
         "Status: Used (<2026-09-26T14:10:00Z>)"
     )
     assert out["unused"] == "Not used yet"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node is not installed")
+def test_recent_sales_find_a_voucher_by_its_deposit_reference() -> None:
+    """The reference is what a customer reads off her phone. If she no
+    longer has the slip, it is the only identifier she has, so the till
+    must find a voucher by it."""
+    voucher = {
+        "serial": "20260926053159711322",
+        "pin_masked": "************2922",
+        "amount_display": "R500.00",
+        "status": "redeemed",
+        "issued_at": "2026-09-26T13:52:00Z",
+        "redeemed_at": "2026-09-26T14:10:00Z",
+        "deposit": {
+            "reference": "KD-W7KGC6",
+            "outcome": "failed",
+            "attempts": 2,
+            "at": "2026-09-26T14:10:00Z",
+        },
+    }
+    queries = ["KD-W7KGC6", "kd-w7kgc6", "W7KGC6", "KD-XXXXXX", "2922"]
+    program = _page_functions() + (
+        f"\nconst v = {json.dumps(voucher)};"
+        f"\nconst queries = {json.dumps(queries)};"
+        "\nconsole.log(JSON.stringify({"
+        " found: queries.map((q) => matchesSearch(v, q)),"
+        " text: enquiryText(v, (iso) => `<${iso}>`),"
+        " outcome: outcomeText(v.deposit) }));"
+    )
+    result = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+
+    # Whole, lower-cased, and without the KD- prefix; a wrong one misses.
+    assert out["found"] == [True, True, True, False, True]
+    # The retry count matters: a customer may be holding an older reference.
+    assert out["outcome"] == "Did not go through (2 attempts)"
+    # The enquiry text ties the slip to what she sees in the app.
+    assert "Deposit: KD-W7KGC6" in out["text"]
+    assert "Money: Did not go through (2 attempts)" in out["text"]
+    # Never where the money was going.
+    for secret in ("shap", "account", "+27"):
+        assert secret not in out["text"].lower()

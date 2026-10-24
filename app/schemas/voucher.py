@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, StrictInt
 from app.models import VoucherStatus
 from app.money import Cents, format_rand
 from app.qr import voucher_payload, voucher_qr_svg
+from app.deposits import DepositTrace
 from app.switch import VendedVoucher, VoucherSummary
 
 
@@ -41,6 +42,29 @@ class VendResponse(BaseModel):
         )
 
 
+class DepositTraceItem(BaseModel):
+    """What became of a redeemed voucher, for a cashier facing a customer.
+
+    Only ever a reference, a coarse outcome and a time. The till belongs to
+    the shop, and the shop must not learn where its customer banks, so no
+    destination, account, holder name, user or fee appears here.
+    """
+
+    reference: str
+    outcome: str  # in_progress | paid | failed
+    attempts: int
+    at: datetime
+
+    @classmethod
+    def of(cls, trace: DepositTrace) -> "DepositTraceItem":
+        return cls(
+            reference=trace.reference,
+            outcome=trace.outcome,
+            attempts=trace.attempts,
+            at=trace.at,
+        )
+
+
 class VoucherListItem(BaseModel):
     serial: str
     pin_masked: str
@@ -49,9 +73,15 @@ class VoucherListItem(BaseModel):
     status: VoucherStatus
     issued_at: datetime
     redeemed_at: datetime | None
+    # Present once the voucher has been redeemed into a deposit. "Redeemed"
+    # is where the till's own knowledge stops, and it is not an answer to
+    # "the money never came".
+    deposit: DepositTraceItem | None = None
 
     @classmethod
-    def from_summary(cls, summary: VoucherSummary) -> "VoucherListItem":
+    def from_summary(
+        cls, summary: VoucherSummary, trace: DepositTrace | None = None
+    ) -> "VoucherListItem":
         return cls(
             serial=summary.serial,
             pin_masked=summary.pin_masked,
@@ -60,4 +90,5 @@ class VoucherListItem(BaseModel):
             status=summary.status,
             issued_at=summary.issued_at,
             redeemed_at=summary.redeemed_at,
+            deposit=DepositTraceItem.of(trace) if trace is not None else None,
         )

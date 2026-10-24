@@ -105,6 +105,10 @@ class DepositRecordResponse(BaseModel):
     failure_reason: str | None
     created_at: datetime
     destination: dict[str, Any]
+    # The serial printed on the till slip this voucher came from, so her
+    # phone and her piece of paper name the same thing when something
+    # goes wrong. Null for a deposit whose voucher has since been purged.
+    voucher_serial: str | None = None
 
     @classmethod
     def of(cls, view: DepositRecordView) -> "DepositRecordResponse":
@@ -121,6 +125,7 @@ class DepositRecordResponse(BaseModel):
             failure_reason=view.failure_reason,
             created_at=view.created_at,
             destination=destination,
+            voucher_serial=view.voucher_serial,
         )
 
 

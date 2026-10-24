@@ -72,6 +72,10 @@
   .badge.active { background: var(--ok-bg); color: var(--brand); }
   .badge.redeemed { background: var(--line); color: var(--ink); }
   .enquiry dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; }
+  /* A wrapper so the deposit rows can be hidden as a pair; display:contents
+     keeps them in the dl's grid instead of becoming one cell. The [hidden]
+     rule below still wins when they are not shown. */
+  #enq-deposit-rows { display: contents; }
   .enquiry dt { color: var(--muted); }
   .enquiry dd { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
   .header-links { display: flex; gap: 4px; }
@@ -183,8 +187,8 @@
     <h2>Recent sales</h2>
     <p class="muted">The last 50 vouchers sold. If a customer says their voucher isn't working,
       find it by the serial or the last 4 digits of the PIN on their slip.</p>
-    <label for="recent-search">Serial or PIN</label>
-    <input id="recent-search" inputmode="numeric" autocomplete="off" placeholder="e.g. 2922">
+    <label for="recent-search">Serial, PIN or deposit reference</label>
+    <input id="recent-search" inputmode="numeric" autocomplete="off" placeholder="e.g. 2922 or KD-W7KGC6">
     <div id="recent-error" class="error" role="alert" hidden></div>
     <p class="muted" id="recent-status" aria-live="polite"></p>
     <ul class="sales" id="recent-list"></ul>
@@ -204,6 +208,14 @@
       <dt>PIN</dt><dd class="mono" id="enq-pin"></dd>
       <dt>Sold</dt><dd id="enq-issued"></dd>
       <dt>Used</dt><dd id="enq-redeemed"></dd>
+      <!-- Only once redeemed. "Used" alone is no answer to "the money
+           never came", and the reference is what the customer can read
+           off her phone. Never where the money was going: that is the
+           customer's business, not the shop's. -->
+      <div id="enq-deposit-rows" hidden>
+        <dt>Deposit</dt><dd class="mono" id="enq-reference"></dd>
+        <dt>Money</dt><dd id="enq-outcome"></dd>
+      </div>
     </dl>
     <p class="muted" id="enq-advice"></p>
     <div class="row">
@@ -319,8 +331,15 @@ function formatWhen(iso) {
    last 4 digits (all the till ever sees of a sold PIN), so typing the whole
    PIN finds it too. */
 function matchesSearch(voucher, query) {
-  const digits = String(query).replace(/\D/g, "");
-  if (!digits) return true;
+  const raw = String(query).trim();
+  if (!raw) return true;
+  // A deposit reference (KD-W7KGC6) is what the customer reads off her
+  // phone; it is the only identifier she has if she no longer has the
+  // slip. Matched whole, case-insensitively, with or without the KD-.
+  const reference = voucher.deposit ? voucher.deposit.reference.toUpperCase() : "";
+  if (reference && reference.includes(raw.toUpperCase().replace(/\s/g, ""))) return true;
+  const digits = raw.replace(/\D/g, "");
+  if (!digits) return false;
   const pinLast4 = voucher.pin_masked.slice(-4);
   return voucher.serial.includes(digits) || pinLast4.includes(digits.slice(-4));
 }
@@ -339,6 +358,11 @@ function enquiryText(voucher, when) {
     `Amount: ${voucher.amount_display}`,
     `Sold: ${when(voucher.issued_at)}`,
     `Status: ${statusText(voucher)}${voucher.redeemed_at ? ` (${when(voucher.redeemed_at)})` : ""}`,
+    // The reference ties this slip to what the customer sees in the app:
+    // without it, an enquiry about a used voucher has nothing to go on.
+    ...(voucher.deposit
+      ? [`Deposit: ${voucher.deposit.reference}`, `Money: ${outcomeText(voucher.deposit)}`]
+      : []),
   ].join("\n");
 }
 
@@ -572,6 +596,32 @@ async function loadRecent() {
 
 let enquiryVoucher = null;
 
+/* The deposit outcome in a cashier's words, not the pipeline's. */
+function outcomeText(deposit) {
+  const tried = deposit.attempts > 1 ? ` (${deposit.attempts} attempts)` : "";
+  if (deposit.outcome === "paid") return `Paid out${tried}`;
+  if (deposit.outcome === "failed") return `Did not go through${tried}`;
+  return `Still going${tried}`;
+}
+
+/* What to tell the customer, which depends on where the money actually got
+   to — not just on whether the voucher was used. */
+function adviceFor(v) {
+  if (v.status !== "redeemed") {
+    return "This voucher hasn't been used. The customer can scan the QR code or type the full PIN from their slip in the KasiDeposit app. If it still won't work, copy these details for the enquiry.";
+  }
+  if (!v.deposit) {
+    return "This voucher has already been used in the KasiDeposit app, so it can't be used again. If the customer says they didn't use it, copy these details for the enquiry.";
+  }
+  if (v.deposit.outcome === "paid") {
+    return "The money was paid out. Ask the customer to check the deposit reference above against their app and their bank — payments can take a little while to show.";
+  }
+  if (v.deposit.outcome === "failed") {
+    return "The payout did not go through, so the voucher was put back and can be used again in the app. Copy these details if the customer needs help.";
+  }
+  return "The payout is still going. Ask the customer to open the app and check this reference in a few minutes.";
+}
+
 function showEnquiry(v) {
   enquiryVoucher = v;
   $("enq-status").textContent = statusText(v);
@@ -580,9 +630,17 @@ function showEnquiry(v) {
   $("enq-pin").textContent = groupPin(v.pin_masked);
   $("enq-issued").textContent = formatWhen(v.issued_at);
   $("enq-redeemed").textContent = v.redeemed_at ? formatWhen(v.redeemed_at) : "—";
-  $("enq-advice").textContent = v.status === "redeemed"
-    ? "This voucher has already been used in the KasiDeposit app, so it can't be used again. If the customer says they didn't use it, copy these details for the enquiry."
-    : "This voucher hasn't been used. The customer can scan the QR code or type the full PIN from their slip in the KasiDeposit app. If it still won't work, copy these details for the enquiry.";
+
+  // What became of the money, once the voucher was used. Only shown when
+  // the server sent a trace; "used" on its own answers nothing for a
+  // customer standing there saying the money never arrived.
+  $("enq-deposit-rows").hidden = !v.deposit;
+  if (v.deposit) {
+    $("enq-reference").textContent = v.deposit.reference;
+    $("enq-outcome").textContent = outcomeText(v.deposit);
+  }
+
+  $("enq-advice").textContent = adviceFor(v);
   $("enq-copied").textContent = "";
   show("enquiry");
 }

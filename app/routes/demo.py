@@ -41,6 +41,7 @@ from app.risk import Band, RiskOverride
 from app.schemas.demo_risk import ForcedRiskResponse, ForceRiskRequest
 from app.schemas.float import FloatResponse, FundFloatRequest
 from app.schemas.voucher import VendRequest, VendResponse, VoucherListItem
+from app.deposits import DepositService
 from app.switch import AmountOutOfRange, VoucherSwitch
 
 PREFIX = "/demo"
@@ -58,6 +59,14 @@ def get_switch(request: Request) -> VoucherSwitch:
 
 SessionDep = Annotated[Session, Depends(get_session)]
 SwitchDep = Annotated[VoucherSwitch, Depends(get_switch)]
+
+
+def get_deposits(request: Request) -> DepositService:
+    service: DepositService = request.app.state.deposits
+    return service
+
+
+DepositsDep = Annotated[DepositService, Depends(get_deposits)]
 
 
 @router.post("/vouchers", status_code=status.HTTP_201_CREATED)
@@ -116,9 +125,19 @@ def vend_voucher(
 
 
 @router.get("/vouchers")
-def list_recent_vouchers(session: SessionDep, switch: SwitchDep) -> list[VoucherListItem]:
-    """The most recent vouchers, for the demo till screen. PINs are masked."""
-    return [VoucherListItem.from_summary(s) for s in switch.recent(session, RECENT_LIMIT)]
+def list_recent_vouchers(
+    session: SessionDep, switch: SwitchDep, deposits: DepositsDep
+) -> list[VoucherListItem]:
+    """The most recent vouchers, for the demo till screen. PINs are masked.
+
+    Each redeemed voucher carries what became of its deposit, so a cashier
+    can answer "I redeemed it and the money never came" instead of only
+    "it says used". The trace is deliberately thin — reference, outcome,
+    time — and never says where the money was going.
+    """
+    summaries = switch.recent(session, RECENT_LIMIT)
+    traces = deposits.traces_for_vouchers(session, [s.serial for s in summaries])
+    return [VoucherListItem.from_summary(s, traces.get(s.serial)) for s in summaries]
 
 
 def _float(session: Session) -> FloatResponse:

@@ -81,9 +81,9 @@ import logging
 import re
 import secrets
 import uuid
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -100,6 +100,7 @@ from app.models import (
     LedgerAccount,
     Payout,
     PayoutStatus,
+    Voucher,
     VoucherStatus,
     VoucherToken,
 )
@@ -153,6 +154,17 @@ APP_STATUS: dict[DepositStatus, str] = {
 
 # What `advance` still has work to do on.
 IN_FLIGHT: frozenset[DepositStatus] = frozenset({S.CHARGED, S.PAYING})
+
+# What a cashier is told about a redeemed voucher's deposit. Coarser than
+# APP_STATUS on purpose: the shop needs to know whether the money went,
+# not which stage of our payout pipeline it is in.
+TILL_OUTCOME: dict[DepositStatus, str] = {
+    S.PENDING: "in_progress",
+    S.CHARGED: "in_progress",
+    S.PAYING: "in_progress",
+    S.SETTLED: "paid",
+    S.FAILED: "failed",
+}
 
 REFERENCE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no O/0, no I/1
 REFERENCE_LENGTH = 6
@@ -229,6 +241,21 @@ class DepositView:
 
 
 @dataclass(frozen=True)
+class DepositTrace:
+    """One voucher's deposit, as much as a shop may be told about it.
+
+    Carries no destination, account, holder name, user or fee: a trace
+    exists to settle "did my money go through", not to tell a spaza where
+    its customer banks.
+    """
+
+    reference: str
+    outcome: str  # in_progress | paid | failed (TILL_OUTCOME)
+    attempts: int  # >1 when a failed payout was retried on the same voucher
+    at: datetime  # when the latest attempt was made
+
+
+@dataclass(frozen=True)
 class DepositRecordView:
     """One of a user's deposits for their history: what was sent and where."""
 
@@ -241,6 +268,12 @@ class DepositRecordView:
     failure_reason: str | None
     created_at: datetime
     destination: dict[str, Any]  # public fields only: never an account number
+    # The issuer's serial for the voucher this came from — the number
+    # printed on the slip she was handed at the shop. Without it her phone
+    # and her slip share no visible identifier, so neither she nor the
+    # cashier can match one to the other when a deposit goes wrong. Not a
+    # new disclosure: she held the slip, and the PIN, already.
+    voucher_serial: str | None
 
 
 def public_destination(stored: Mapping[str, Any]) -> dict[str, Any]:
@@ -858,12 +891,68 @@ class DepositService:
 
     # --- history -----------------------------------------------------------
 
+    # --- tracing -----------------------------------------------------------
+
+    def traces_for_vouchers(
+        self, session: Session, serials: Sequence[str]
+    ) -> dict[str, "DepositTrace"]:
+        """What became of each voucher's deposit, keyed by voucher SERIAL.
+
+        By serial, not PIN, on purpose. The till's list masks PINs so that
+        reading it can never hand anyone a PIN to spend, and the caller
+        therefore has no PIN to pass — nor should it need one. The serial
+        is the slip's public reference and joins just as well.
+
+        For answering "I redeemed this and the money never came". The till
+        can say whether a voucher was used and when, but "used" is where its
+        knowledge stops: whether the payout then settled, failed or is still
+        going lives here, and without it a cashier facing a customer has
+        nothing to offer.
+
+        Deliberately narrow. The till belongs to the shop, and the shop has
+        no business learning where a customer banks, so a trace carries a
+        reference, a coarse outcome and a time — never the destination, the
+        account, the user or the fee.
+
+        A voucher can have more than one deposit: a failed payout returns it
+        to active (`reverse_charge`) so it can be tried again. The latest
+        attempt is the one that matters, with `attempts` saying whether to
+        go looking for the others.
+        """
+        if not serials:
+            return {}
+        rows = session.execute(
+            select(Voucher.serial, Deposit)
+            .join(Deposit, Deposit.voucher_pin == Voucher.pin)
+            .where(Voucher.serial.in_(serials))
+            .order_by(Voucher.serial, Deposit.created_at.desc(), Deposit.id)
+        ).all()
+        traces: dict[str, DepositTrace] = {}
+        for serial, deposit in rows:
+            existing = traces.get(serial)
+            if existing is None:  # ordered newest first: this is the latest
+                traces[serial] = DepositTrace(
+                    reference=deposit.reference,
+                    outcome=TILL_OUTCOME[deposit.status],
+                    attempts=1,
+                    at=deposit.created_at,
+                )
+            else:
+                traces[serial] = replace(existing, attempts=existing.attempts + 1)
+        session.rollback()  # end the read transaction; never leave it idle
+        return traces
+
     def list_deposits(
         self, session: Session, user_id: uuid.UUID, limit: int
     ) -> list[DepositRecordView]:
-        """The user's most recent deposits, newest first. Read-only."""
-        rows = session.scalars(
-            select(Deposit)
+        """The user's most recent deposits, newest first. Read-only.
+
+        Joined to the voucher for its serial, so a deposit in her history
+        names the slip it came from. One join, not a query per row.
+        """
+        rows = session.execute(
+            select(Deposit, Voucher.serial)
+            .outerjoin(Voucher, Voucher.pin == Deposit.voucher_pin)
             .where(Deposit.user_id == user_id)
             .order_by(Deposit.created_at.desc(), Deposit.id)
             .limit(limit)
@@ -879,8 +968,9 @@ class DepositService:
                 failure_reason=d.failure_reason,
                 created_at=d.created_at,
                 destination=public_destination(d.destination),
+                voucher_serial=serial,
             )
-            for d in rows
+            for d, serial in rows
         ]
         session.rollback()  # end the read transaction; never leave it idle
         return records
