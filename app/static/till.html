@@ -238,6 +238,11 @@
     </form>
     <div id="manager-error" class="error" role="alert" hidden></div>
 
+    <!-- Hidden, not deleted: this is the only way to list a number so the
+         app can resolve it, so the PayShap path cannot be demonstrated
+         while it is off. Delete the `hidden` below to bring it back; the
+         script behind it is untouched and still wired up. -->
+    <div id="shapid-manager" hidden>
     <h2>PayShap numbers (demo)</h2>
     <p class="muted">There is no connection to PayShap in the demo. A number listed here
       is "registered for PayShap" in this person's name at this bank, so the app can check
@@ -259,6 +264,7 @@
       <div class="row"><button type="submit" class="primary">Add number</button></div>
     </form>
     <div id="shapid-error" class="error" role="alert" hidden></div>
+    </div>
 
     <div class="row">
       <button type="button" class="secondary" id="to-sell">Back to till</button>
