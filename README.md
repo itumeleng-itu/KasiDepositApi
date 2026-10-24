@@ -82,7 +82,7 @@ URL includes `/v1`.
 | `DELETE /v1/me/payout-methods/{id}` | | the list |
 | `GET /v1/me/deposits` | `?limit=` 1 to 50, default 20 | `{deposits: [{id, reference, status, payout_cents, value_cents, fee_cents, failure_reason, created_at, destination}]}`, newest first |
 
-- **Users.** Every call except `POST /v1/users` and `GET /v1/shapid` needs
+- **Users.** Every call except `POST /v1/users` needs
   `Authorization: Bearer <access_token>`. Without a valid one it is 401
   `{"reason": "not_registered"}`, and the app goes back to its register
   screen. A deposit is visible only to the user who made it; anyone else gets
@@ -125,19 +125,85 @@ URL includes `/v1`.
 ### What happens on a deposit
 
 1. **Resolve the destination first.** A ShapID failure means nothing was charged.
-2. **In one transaction:** check the float, charge the voucher under a row
+2. **Assess the risk** (`app/risk.py`), before anything is locked or charged.
+   See below.
+3. **In one transaction:** check the float, charge the voucher under a row
    lock, record the deposit, post the charge entries, then commit. Two
    requests for one PIN cannot both succeed, and neither can two deposits
    that together exceed the float.
-3. **Instruct the payout.** If the provider cannot be reached, the deposit
+4. **Instruct the payout.** If the provider cannot be reached, the deposit
    stays charged and the next status read instructs it.
-4. **The app polls.** Each read moves an in-flight deposit forward. A
+5. **The deposit is advanced.** Each status read moves an in-flight deposit
+   forward, and so does the payout worker (below) for deposits nobody is
+   polling. Both go through one function, `DepositService.advance`. A
    completed payout posts the settlement entries. A failed payout reverses the
    charge and returns the voucher to active, so "Try again" with the same PIN
    works. A slow or unreachable provider is never a failure.
 
+### The payout worker
+
+`PAYOUT_WORKER_ENABLED=true` starts `app/worker.py` on a thread in the web
+process. Every `PAYOUT_WORKER_INTERVAL_SECONDS` (15) it advances `charged` and
+`paying` deposits that haven't changed for `PAYOUT_WORKER_MIN_AGE_SECONDS`
+(10), so a deposit whose phone went flat still settles. It is off by default,
+so development and the test suite are unaffected.
+
+- **The provider is never called inside a transaction.** Each step reads, ends
+  its transaction, calls the provider, then locks the deposit row and writes
+  only if the status is still what it read.
+- **It is safe to kill at any point.** Payouts are instructed with the deposit
+  id as the idempotency key, so a retry gets the same payout back, never a
+  second one. The settlement entries and the status change commit together,
+  and only while the deposit still says `paying`. The comment above
+  `DepositService.advance` goes through each crash point.
+- **It is safe with several instances.** A Postgres advisory lock per deposit
+  keeps two processes off the same deposit; the re-check under the row lock
+  would hold even without it.
+- Each advance is logged as `deposit <id>: <from> -> <to>` through the same
+  personal-number filter as the risk log.
+
 Reversing a charge is a **demo simplification**: a real issuer would need a
 reversal API, and may not expose one.
+
+### Deposit risk
+
+The abuse this guards against is social engineering: someone talked into
+buying a voucher and reading the PIN to a stranger, or a stolen PIN redeemed
+into the thief's account. `app/risk.py` scores each deposit from rows we
+already hold. Nothing new is stored, and it can be replaced by a real
+provider through one class, like the identity and payout mocks.
+
+| Signal | Fires when |
+|---|---|
+| Velocity | too many deposits in the last hour, or in the last 24 hours against the user's own daily average |
+| Novelty | a payout method is used within minutes of being added, by a user who has deposited somewhere else before |
+| Value | far above the user's median deposit, once there are a few to compare |
+| Redemption lag | seconds after the vend (weak evidence) or days after it |
+| Destination churn | several different destinations in a day |
+
+Each signal adds its weight, and the score picks a band:
+
+| Band | The client gets | Charged? |
+|---|---|---|
+| allow | the deposit, as before | yes |
+| warn | 409 `{"reason": "confirmation_required"}`. The app shows its interstitial and resends with the same `Idempotency-Key` and `"risk_acknowledged": true`. | only after the resend |
+| review | 403 `{"reason": "deposit_declined"}`. `risk_acknowledged` makes no difference. The voucher stays active. | no |
+
+- **The client never learns why.** Not the rule, the score or a threshold:
+  that would teach someone how to stay under it. The decision is logged with
+  band, score, rule ids and the user's internal id, and the risk logger masks
+  any personal number that slips in (`app/log_redaction.py`).
+- **It fails open.** If gathering the facts or scoring throws, the deposit
+  goes ahead and an ERROR is logged. A scoring bug must never strand cash
+  someone has already paid.
+- **It runs outside the charge.** The facts are read in a short transaction
+  that ends before the decision is made, and before the float, token or
+  voucher locks are taken. A provider that calls out over the network never
+  holds a transaction open.
+- **A replay is never assessed.** The same `Idempotency-Key` returns its
+  deposit even if the band has changed since.
+- Every threshold and weight is a `RISK_*` setting (`app/config.py`).
+  `RISK_ENABLED=false` switches it off without a deploy.
 
 ### Demo scenarios
 
@@ -170,6 +236,8 @@ scenarios match the app's own fake (see its `TESTING.md`).
 | `GET /demo/shapids` | the demo PayShap directory |
 | `POST /demo/shapids` `{"number": "082 555 1234", "full_name": "Thabo Mokoena", "bank": "FNB"}` | lists a number: it now resolves to "T. Mokoena" at FNB. The till page's manager screen does this. |
 | `DELETE /demo/shapids/{number}` | unlists it |
+| `POST /demo/risk` `{"band": "warn"}` or `{"band": "review", "minutes": 5}` | every deposit gets this risk band until it expires (default 10 minutes, at most `RISK_DEMO_FORCE_MAX_MINUTES`) or is cleared. Logged as rule `demo_forced`. `allow` can't be forced: that would only switch the protection off. |
+| `GET /demo/risk` / `DELETE /demo/risk` | the forced band, if any / back to real scoring |
 
 Safeguards:
 
@@ -305,6 +373,25 @@ generates `DEMO_API_KEY` itself.
 | `ENABLE_DEMO_ROUTES` | `true` | set by `render.yaml` |
 | `DEMO_API_KEY` | generated | read it from the dashboard to call `/demo` |
 | `PII_KEY` | the same value as your local `.env` | enter it in the dashboard; local and hosted share one database, so they must share one key. Encrypts ID and account numbers. **Back it up**: losing it makes them unrecoverable, and changing it needs a re-encryption. Unset, registration is refused. |
+| `PAYOUT_WORKER_ENABLED` | optional, default `false` | `true` advances deposits nobody is polling (see **The payout worker**). `PAYOUT_WORKER_INTERVAL_SECONDS`, `PAYOUT_WORKER_MIN_AGE_SECONDS` and `PAYOUT_WORKER_BATCH_SIZE` tune it. |
+| `RATE_LIMIT_*`, `TRUSTED_PROXY_HOPS` | optional | the `/v1` rate limits below; defaults in `app/config.py`. Changing one in the dashboard restarts the service with the new value, no code change. |
+
+**Rate limits on `/v1`** (`app/rate_limit.py`). Over a limit is 429
+`{"reason": "rate_limited"}` with `Retry-After`, and no response anywhere
+says how much quota is left.
+
+| Route | Keyed on | Default | Settings |
+|---|---|---|---|
+| `GET /v1/shapid/{shap_id}` | client IP, before the token check | 10 a minute | `RATE_LIMIT_SHAPID_REQUESTS`, `RATE_LIMIT_SHAPID_WINDOW_SECONDS` |
+| `POST /v1/users` | client IP | 20 an hour | `RATE_LIMIT_REGISTER_REQUESTS`, `RATE_LIMIT_REGISTER_WINDOW_SECONDS` |
+| `POST /v1/vouchers/lookup` | access token | 10 a minute | `RATE_LIMIT_LOOKUP_REQUESTS`, `RATE_LIMIT_LOOKUP_WINDOW_SECONDS` |
+| `GET /v1/deposits/{id}` | access token | 120 a minute (the app polls at most once a second) | `RATE_LIMIT_DEPOSIT_STATUS_REQUESTS`, `RATE_LIMIT_DEPOSIT_STATUS_WINDOW_SECONDS` |
+
+The client IP is the `X-Forwarded-For` entry `TRUSTED_PROXY_HOPS` (default 1)
+from the right: the one Render's proxy appends. The leftmost entry, which
+uvicorn reports as the client under `--forwarded-allow-ips "*"`, is whatever
+the caller wrote, so it is never used. Keys are an IP or a hash of the token,
+never a PIN, ShapID, ID number or account number. `/health` is not limited.
 
 **What production serves:**
 
@@ -341,25 +428,58 @@ against a Frankfurt database, because most tests make many network round trips.
 - Schema changes are Alembic migrations, never `create_all`.
 - Every table must enable row-level security (see migrations `0003` and `0004`):
   hosted providers expose `public` to a public API key otherwise. A test enforces it.
-- Lock order is always: the float lock, then the voucher's row lock. Charge the
-  voucher before inserting anything that references it.
+- Lock order is always: the float lock, then the voucher's row lock, then the
+  deposit's row lock. Charge the voucher before inserting anything that
+  references it. Reversing a failed payout holds the voucher before it locks
+  the deposit, for the same reason.
+- Never call the payout provider with a transaction open: read, end the
+  transaction, call, then lock and re-check before writing.
 
 ## Known limits
 
-- **No user authentication or rate limiting on `/v1`.** Anyone can look up a
-  PIN (it takes the full 16 digits, and there are 10^16 of them), and every
-  lookup stores a short-lived token.
-- **Payouts advance when the deposit is read.** There is no background worker,
-  so a deposit nobody polls stays `submitted` until someone reads it.
+- **Rate limits live in process memory.** They are right for the one uvicorn
+  worker on one instance that `render.yaml` runs. With more workers or
+  instances each client gets that many times the limit, and a restart clears
+  the counts. Before scaling out, move them to a shared store (Redis or a
+  Postgres table) behind the same interface; startup logs a warning if
+  `WEB_CONCURRENCY` asks for more than one worker.
+- **`TRUSTED_PROXY_HOPS=1` assumes Render's proxy is the only hop that
+  appends to `X-Forwarded-For`.** If another proxy or CDN is put in front, raise it,
+  or every client behind that proxy shares one limit.
+- **A warn only protects a user from someone else.** It stops a victim being
+  rushed: the interstitial comes before anything is charged. But a thief
+  redeeming into their own account controls the app and can always send
+  `risk_acknowledged`. Against them only a review helps.
+- **Risk rules are untuned.** The weights and thresholds are informed
+  guesses, not fitted to real fraud. Watch the `app.risk` log, and tune with
+  the `RISK_*` settings before trusting the review band. The forced band
+  (`/demo/risk`) lives in process memory and applies only to the instance
+  that set it.
+- **Per-IP limits meet carrier-grade NAT.** South African mobile networks put
+  many phones behind one address, so a busy cell can share one registration
+  and ShapID budget. The registration default (20 an hour) allows for that.
+- **Unpolled deposits wait for the worker, and the worker is off by
+  default.** Without `PAYOUT_WORKER_ENABLED`, a deposit nobody polls stays
+  `submitted` until someone reads it. On Render's free plan the instance
+  sleeps after 15 minutes without traffic, and the worker sleeps with it.
+- **Payout idempotency depends on the provider keeping keys.** A crash between
+  instructing a payout and recording it is safe only because the provider
+  returns the same payout for the same key. The mock remembers keys in memory
+  only, so after a restart it would hand out a new reference (it moves no
+  money). A real provider must keep keys for longer than the worker can take
+  to retry; check its retention window.
 - **The float lock serialises every deposit.** That is fine at demo volume.
-- **The account-number destination** (`kind: "account"`) stores a bank account
-  number. That is personal information under POPIA. Nothing constructs it
-  today, and it needs a retention and encryption decision before it goes live.
-- **Logs:** ShapIDs are masked in the access log (`/v1/shapid/***`), and SQL
-  errors never include their parameters, so PINs stay out of logs.
-- **A real payout provider** must be called outside the database transaction.
-  The mock answers instantly; a slow real call would hit the 10s
-  idle-in-transaction limit.
+- **Account numbers have no retention rule.** Bank account payout methods
+  (`POST /v1/me/payout-methods` with `kind: "account"`) and account
+  destinations on deposits are live. The number is encrypted at rest with a
+  keyed hash for lookup (`app/pii.py`), and without `PII_KEY` the account path
+  is refused rather than stored in plaintext. But every deposit keeps its own
+  encrypted copy in its destination snapshot, and removing the payout method
+  does not touch those, so nothing ever deletes them. That still needs a
+  POPIA retention decision.
+- **Logs:** ShapIDs are masked in the access log (`/v1/shapid/***` and
+  `/demo/shapids/***`), and SQL errors never include their parameters, so PINs
+  stay out of logs.
 
 ## Known tech debt
 

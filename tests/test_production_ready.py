@@ -131,6 +131,8 @@ def test_sql_errors_do_not_carry_their_parameters(engine: Engine) -> None:
     [
         ("/v1/shapid/%2B27821234567", "/v1/shapid/***"),
         ("/v1/shapid/%2B27821234567%40fnb", "/v1/shapid/***"),
+        ("/demo/shapids/0821234567", "/demo/shapids/***"),
+        ("/demo/shapids", "/demo/shapids"),
         ("/v1/deposits/abc", "/v1/deposits/abc"),
     ],
 )

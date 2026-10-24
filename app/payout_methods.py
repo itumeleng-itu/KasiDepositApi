@@ -52,6 +52,12 @@ _ACCOUNT_NUMBER = re.compile(r"^[0-9]{7,11}$")
 
 
 @dataclass(frozen=True)
+class DepositDestination:
+    destination: dict[str, Any]
+    added_at: datetime
+
+
+@dataclass(frozen=True)
 class PayoutMethodView:
     id: uuid.UUID
     kind: str
@@ -246,11 +252,13 @@ class PayoutMethodService:
 
     def destination_for_deposit(
         self, session: Session, user_id: uuid.UUID, method_id: uuid.UUID
-    ) -> dict[str, Any]:
-        """The snapshot stored on a deposit. A PayShap number is resolved
-        again first, so a number suspended since it was added is refused
-        before anything is charged."""
+    ) -> "DepositDestination":
+        """The snapshot stored on a deposit, and when the method was added
+        (deposit risk reads it). A PayShap number is resolved again first, so
+        a number suspended since it was added is refused before anything is
+        charged."""
         method = self._owned(session, user_id, method_id)
+        added_at = method.created_at  # read before the rollback below expires the row
         if method.kind is PayoutMethodKind.SHAP_ID:
             assert method.shap_id is not None
             try:
@@ -274,7 +282,7 @@ class PayoutMethodService:
                 "account_number_encrypted": base64.b64encode(method.account_number_encrypted).decode(),
             }
         session.rollback()  # the deposit is created in its own transaction
-        return destination
+        return DepositDestination(destination, added_at)
 
     # --- helpers -----------------------------------------------------------
 

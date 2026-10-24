@@ -2,9 +2,11 @@
 
 These endpoints stand in for the till at the spaza shop that takes cash and
 prints a PIN. In the real product that terminal belongs to the issuer, not to
-us. They also let the demo operator top up and inspect the float, and keep the
+us. They also let the demo operator top up and inspect the float, keep the
 demo PayShap directory (/demo/shapids): the numbers that resolve to a real
-name and bank in the demo, since we have no connection to PayShap itself.
+name and bank in the demo, since we have no connection to PayShap itself, and
+force a deposit risk band for a few minutes (/demo/risk), so the warn and
+review behaviour can be shown without building up a real pattern.
 
 - They must never be exposed to, or called by, the mobile app. The app only
   ever redeems; it can never vend.
@@ -21,6 +23,7 @@ name and bank in the demo, since we have no connection to PayShap itself.
 
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
@@ -33,6 +36,8 @@ from app.db import get_session
 from app.ledger import available_float, balance_of, fund_float
 from app.models import DemoShapId, LedgerAccount
 from app.schemas.demo_shapid import AddDemoShapIdRequest, DemoShapIdResponse, normalise_number
+from app.risk import Band, RiskOverride
+from app.schemas.demo_risk import ForcedRiskResponse, ForceRiskRequest
 from app.schemas.float import FloatResponse, FundFloatRequest
 from app.schemas.voucher import VendRequest, VendResponse, VoucherListItem
 from app.switch import AmountOutOfRange, VoucherSwitch
@@ -137,6 +142,47 @@ def remove_demo_shapid(number: str, session: SessionDep) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
     session.delete(entry)
     session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _override(request: Request) -> RiskOverride:
+    override: RiskOverride = request.app.state.risk_override
+    return override
+
+
+def _forced(override: RiskOverride) -> ForcedRiskResponse:
+    current = override.current(datetime.now(UTC))
+    if current is None:
+        return ForcedRiskResponse(band=None, expires_at=None)
+    band, until = current
+    return ForcedRiskResponse(band=band.value, expires_at=until)  # type: ignore[arg-type]
+
+
+@router.get("/risk")
+def get_forced_risk(request: Request) -> ForcedRiskResponse:
+    """The forced risk band, if one is on."""
+    return _forced(_override(request))
+
+
+@router.post("/risk")
+def force_risk(body: ForceRiskRequest, request: Request) -> ForcedRiskResponse:
+    """Every deposit gets this band until it expires or is cleared. In
+    process memory: it applies to the one instance that served this call."""
+    settings: Settings = request.app.state.settings
+    if body.minutes > settings.risk_demo_force_max_minutes:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"minutes must be at most {settings.risk_demo_force_max_minutes}",
+        )
+    override = _override(request)
+    override.force(Band(body.band), datetime.now(UTC) + timedelta(minutes=body.minutes))
+    return _forced(override)
+
+
+@router.delete("/risk", status_code=status.HTTP_204_NO_CONTENT)
+def clear_forced_risk(request: Request) -> Response:
+    """Back to real scoring."""
+    _override(request).clear()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

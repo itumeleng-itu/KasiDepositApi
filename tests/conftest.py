@@ -60,6 +60,10 @@ def load_test_settings() -> Settings:
             min_voucher_cents=1000,
             max_voucher_cents=500000,
             pii_key=TEST_PII_KEY,
+            # Off for the suite at large: its tests vend and redeem within
+            # seconds, many times per user, which is exactly what risk flags.
+            # The risk tests switch it on (tests/test_risk*.py).
+            risk_enabled=False,
         )
     except ValidationError as exc:
         raise pytest.UsageError(f"Cannot load settings for the test run:\n{exc}") from exc

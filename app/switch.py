@@ -88,6 +88,7 @@ class VoucherInfo:
     pin: str
     amount_cents: Cents
     status: VoucherStatus
+    issued_at: datetime  # when it was vended; deposit risk reads the gap (app/risk.py)
 
 
 @dataclass(frozen=True)
@@ -198,7 +199,12 @@ class VoucherSwitch:
         voucher = session.scalar(select(Voucher).where(Voucher.pin == pin))
         if voucher is None:
             raise VoucherNotFound(pin)
-        return VoucherInfo(pin=voucher.pin, amount_cents=voucher.amount_cents, status=voucher.status)
+        return VoucherInfo(
+            pin=voucher.pin,
+            amount_cents=voucher.amount_cents,
+            status=voucher.status,
+            issued_at=voucher.issued_at,
+        )
 
     def charge(self, session: Session, pin: str) -> ChargeResult:
         """Redeem a voucher for its full amount. Single-use: there is no amount.
@@ -239,6 +245,16 @@ class VoucherSwitch:
         # The UPDATE bypassed the ORM; drop the stale copy rather than re-query.
         session.expire(voucher)
         return ChargeResult(pin=pin, amount_cents=amount_cents, redeemed_at=redeemed_at)
+
+    def hold(self, session: Session, pin: str) -> None:
+        """Take the voucher's row lock and change nothing.
+
+        For a caller that must check its own rows before deciding to reverse
+        a charge: it holds the voucher first, then locks the deposit, which
+        keeps the lock order of `charge` (voucher row before deposit row) so
+        the two can never deadlock. Released when the transaction ends.
+        """
+        session.execute(select(Voucher.pin).where(Voucher.pin == pin).with_for_update())
 
     def reverse_charge(self, session: Session, pin: str) -> None:
         """Undo a charge: return a redeemed voucher to active, so it can be used again.
