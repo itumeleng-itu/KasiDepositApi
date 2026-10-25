@@ -97,7 +97,10 @@ URL includes `/v1`.
   the initial of one of their first names: `app/names.py`), else
   `shapid_name_mismatch`. A bank account must belong to the user's ID number
   (`account_not_found`, `account_holder_mismatch`), and its holder is always
-  the registered name. Up to 5; the first is the default; a deposit names one
+  the registered name. **One owner each:** a PayShap number or bank
+  account can be saved by one user only, since it pays into one person's
+  account. A second user gets `shapid_already_linked` / `account_already_linked`
+  (409); removing it frees it (migration `0008_payout_methods_one_owner`). Up to 5; the first is the default; a deposit names one
   by `payout_method_id` and stores a snapshot of it. The user's current
   PayShap number is also copied onto `users.shap_id` (migration
   `0006_users_shap_id`): set when one is added or chosen as the default,
@@ -221,6 +224,7 @@ Each signal adds its weight, and the score picks a band:
 | `id_verification_failed` / `id_number_already_registered` | ID `8001010000081` / `8001010001089` (the identity mock keys off the sequence digits) |
 | A presenter's own PayShap number, and `shapid_name_mismatch` | List it on the till page's manager screen, **PayShap numbers (demo)**, with their name and bank. It then resolves to their masked name ("T. Mokoena") and adds cleanly; anyone else adding it gets `shapid_name_mismatch` |
 | `account_not_found` / `account_holder_mismatch` | An account number ending in 9 / 8 |
+| `shapid_already_linked` / `account_already_linked` | Add a PayShap number or bank account another user has already saved |
 
 The mock payout moves to `submitted` after about 1.5s and settles after 3s.
 Only the three amounts above fail; every other payout completes. The ShapID

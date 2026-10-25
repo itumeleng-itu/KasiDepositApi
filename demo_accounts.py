@@ -25,8 +25,10 @@ On the register screen, type the full names and ID number below exactly. The
 backend recognises the account, and the app goes straight to "Enter your
 voucher PIN", paying into its PayShap number.
 
-The ID numbers are mock: valid by the algorithm, belonging to nobody, so no
-real ID appears on screen in a demo. `seed.py --reset` deletes these
+The ID numbers and PayShap numbers are mock: valid, belonging to nobody, so
+no real ID or phone number appears on screen in a demo, and no real person's
+number is taken (a PayShap number can be saved by one user only: refused as
+shapid_already_linked for anyone else). `seed.py --reset` deletes these
 accounts along with every other user; run this again afterwards.
 
 Refuses to run unless ENVIRONMENT=development, like seed.py. Needs PII_KEY,
@@ -68,7 +70,7 @@ ACCOUNTS: tuple[DemoAccount, ...] = (
         label="Team (our demo)",
         full_names="Itumeleng Tjale",
         id_number="9505155800088",
-        payshap_number="066 496 3438",
+        payshap_number="082 000 0003",
         bank="capitec",
     ),
     DemoAccount(
