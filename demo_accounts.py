@@ -3,6 +3,14 @@
     python demo_accounts.py            # create them, or bring them back in line
     python demo_accounts.py --list     # print the details to type in, change nothing
 
+The two accounts differ on purpose:
+
+- Team: registered, its number listed on PayShap, but NOT saved as a payout
+  method. Signing in on the register screen goes to "How do you want to get
+  paid?", so a demo shows typing the number and "Found on PayShap". Each run
+  removes whatever the team account saved last time: run it before every take.
+- Judges: the number is saved too, so a judge goes straight to depositing.
+
 Each account goes through the same checks as a real sign-up, in the same
 order the app takes them, so it is validated rather than inserted:
 
@@ -12,8 +20,8 @@ order the app takes them, so it is validated rather than inserted:
 2. It is registered through UserService: the SA ID algorithm (13 digits, real
    birth date, citizenship digit, Luhn, 18 or older), the names and the
    identity mock. The ID is stored encrypted under PII_KEY, like any user.
-3. The PayShap number is added through PayoutMethodService: resolved in the
-   directory, and its masked name must match the account
+3. Judges only: the PayShap number is added through PayoutMethodService:
+   resolved in the directory, and its masked name must match the account
    (shapid_name_mismatch otherwise). It becomes the default payout method.
 
 Safe to run again: the same ID and names are the same person, and an existing
@@ -22,8 +30,8 @@ of any phone it is signed in on (re-registering revokes old sessions); typing
 the same names and ID on the register screen signs back in.
 
 On the register screen, type the full names and ID number below exactly. The
-backend recognises the account, and the app goes straight to "Enter your
-voucher PIN", paying into its PayShap number.
+backend recognises the account. For the team account, then choose PayShap and
+type its number.
 
 The ID numbers and PayShap numbers are mock: valid, belonging to nobody, so
 no real ID or phone number appears on screen in a demo, and no real person's
@@ -63,6 +71,9 @@ class DemoAccount:
     id_number: str  # mock: passes the SA ID checks, belongs to nobody
     payshap_number: str  # as people write it; normalised to +27... here
     bank: str  # bank slug, as in app/banks.py
+    # True: the number is saved as the default payout method. False: listed on
+    # PayShap only, and any saved payout method is removed, so the app asks.
+    presaved: bool
 
 
 ACCOUNTS: tuple[DemoAccount, ...] = (
@@ -72,6 +83,7 @@ ACCOUNTS: tuple[DemoAccount, ...] = (
         id_number="9505155800088",
         payshap_number="082 000 0003",
         bank="capitec",
+        presaved=False,
     ),
     DemoAccount(
         label="Judges (testing)",
@@ -79,6 +91,7 @@ ACCOUNTS: tuple[DemoAccount, ...] = (
         id_number="9103034800089",
         payshap_number="082 000 0002",
         bank="capitec",
+        presaved=True,
     ),
 )
 
@@ -89,6 +102,8 @@ class Outcome:
     shap_id: str
     shap_name: str
     created: bool
+    saved: bool  # the number is a saved payout method
+    cleared: int  # payout methods removed so the app asks again
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -115,9 +130,23 @@ def ensure_account(
     # 2. Registered: ID checks, names, identity mock, one account per ID.
     registered = users.register(session, account.full_names, account.id_number)
 
+    if not account.presaved:
+        # Start every take at "How do you want to get paid?".
+        saved = methods.list(session, registered.user_id)
+        for view in saved:
+            methods.remove(session, registered.user_id, view.id)
+        return Outcome(account, shap_id, shap_name, registered.created, saved=False, cleared=len(saved))
+
     # 3. Paid by PayShap: resolved and name-matched, made the default.
     method = methods.add_shap_id(session, registered.user_id, shap_id, make_default=True)
-    return Outcome(account, method.shap_id or shap_id, method.shap_name or shap_name, registered.created)
+    return Outcome(
+        account,
+        method.shap_id or shap_id,
+        method.shap_name or shap_name,
+        registered.created,
+        saved=True,
+        cleared=0,
+    )
 
 
 def run(
@@ -154,11 +183,14 @@ def run(
 
     for o in outcomes:
         state = "created" if o.created else "already existed, checked again"
-        print(
-            f"{o.account.label}: {state}. PayShap {o.shap_id} -> {o.shap_name} "
-            f"({BANK_API_CODES[o.account.bank]}), default payout method.",
-            file=out,
-        )
+        bank = BANK_API_CODES[o.account.bank]
+        if o.saved:
+            where = "saved as the default payout method"
+        else:
+            where = "listed on PayShap, not saved: the app will ask for it"
+            if o.cleared:
+                where += f" ({o.cleared} saved method(s) removed)"
+        print(f"{o.account.label}: {state}. PayShap {o.shap_id} -> {o.shap_name} ({bank}), {where}.", file=out)
     print("", file=out)
     _print_details(out)
     return 0
