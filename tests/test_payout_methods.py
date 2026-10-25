@@ -125,6 +125,58 @@ def test_someone_else_cannot_add_the_presenters_number(api: TestClient) -> None:
     assert (response.status_code, response.json()) == (409, {"reason": "shapid_name_mismatch"})
 
 
+# A different person whose masked name is also "T. Mokoena", so the name check alone would let
+# them add Thabo's number: only the one-owner rule stops it.
+NAMESAKE = {"id_number": "8703045801082", "full_names": "Tumelo Mokoena"}
+
+
+def test_a_namesake_cannot_add_a_number_another_user_has_saved(api: TestClient, clean_db: Engine) -> None:
+    assert _add(api, kind="shap_id", shap_id=PRESENTER).status_code == 201
+    sign_in(api, **NAMESAKE)
+    response = _add(api, kind="shap_id", shap_id=PRESENTER)
+    assert (response.status_code, response.json()) == (409, {"reason": "shapid_already_linked"})
+    with Session(clean_db) as session:
+        assert len(session.scalars(select(PayoutMethod)).all()) == 1
+        namesake = session.scalar(select(User).where(User.full_names == "Tumelo Mokoena"))
+        assert namesake is not None and namesake.shap_id is None
+
+
+def test_a_removed_number_is_free_for_someone_else(api: TestClient) -> None:
+    mine = _add(api, kind="shap_id", shap_id=PRESENTER).json()
+    assert api.delete(f"{METHODS}/{mine['id']}").status_code == 200
+    sign_in(api, **NAMESAKE)
+    assert _add(api, kind="shap_id", shap_id=PRESENTER).status_code == 201
+
+
+def test_adding_your_own_number_again_is_still_not_a_conflict(api: TestClient) -> None:
+    first = _add(api, kind="shap_id", shap_id=PRESENTER)
+    again = _add(api, kind="shap_id", shap_id=PRESENTER)
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert again.json()["id"] == first.json()["id"]
+
+
+def test_the_index_decides_when_two_users_race_for_one_number(
+    api: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _add(api, kind="shap_id", shap_id=PRESENTER).status_code == 201
+    sign_in(api, **NAMESAKE)
+    # As if the other user's insert committed just after our check looked.
+    from app.payout_methods import PayoutMethodService
+
+    monkeypatch.setattr(PayoutMethodService, "_held_by_another", lambda *_args: False)
+    response = _add(api, kind="shap_id", shap_id=PRESENTER)
+    assert (response.status_code, response.json()) == (409, {"reason": "shapid_already_linked"})
+
+
+def test_another_user_cannot_add_an_account_someone_has_saved(api: TestClient, clean_db: Engine) -> None:
+    assert _add(api, kind="account", bank="CAPITEC", account_number=ACCOUNT).status_code == 201
+    sign_in(api, **NAMESAKE)
+    response = _add(api, kind="account", bank="CAPITEC", account_number=ACCOUNT)
+    assert (response.status_code, response.json()) == (409, {"reason": "account_already_linked"})
+    # The same digits at another bank are another account.
+    assert _add(api, kind="account", bank="FNB", account_number=ACCOUNT).status_code == 201
+
+
 # --- adding a bank account ----------------------------------------------------------------
 
 

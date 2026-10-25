@@ -394,16 +394,16 @@ class PayoutMethod(Base):
             name="shap_id_format",
         ),
         Index("uq_payout_methods_one_default", "user_id", unique=True, postgresql_where=text("is_default")),
+        # One owner each (migration 0008): a PayShap number or bank account
+        # pays into one person's account, so it is saved by one user only.
         Index(
-            "uq_payout_methods_user_shap_id",
-            "user_id",
+            "uq_payout_methods_shap_id",
             "shap_id",
             unique=True,
             postgresql_where=text("shap_id IS NOT NULL"),
         ),
         Index(
-            "uq_payout_methods_user_account",
-            "user_id",
+            "uq_payout_methods_account",
             "account_number_hash",
             unique=True,
             postgresql_where=text("account_number_hash IS NOT NULL"),

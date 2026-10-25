@@ -4,6 +4,7 @@ Rows here are written with raw SQL on purpose: these tests check what
 Postgres rejects, not what the application happens to avoid doing.
 """
 
+import uuid
 from typing import Any
 
 import pytest
@@ -16,6 +17,8 @@ from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import Base, Voucher, VoucherStatus
+from app.pii import SA_ID, PiiCipher
+from tests.conftest import TEST_PII_KEY
 
 PIN = "1234567890123456"
 SERIAL = "20260924123456789012"
@@ -186,3 +189,43 @@ def test_migration_downgrades_cleanly_and_upgrades_again(
         assert conn.execute(text("SELECT to_regclass('vouchers')")).scalar_one() is not None
         assert conn.execute(type_count).scalar_one() == len(enums)
         assert conn.execute(function_count).scalar_one() == len(functions)
+
+
+def test_one_owner_migration_refuses_a_database_with_a_shared_number(
+    clean_db: Engine, alembic_config: Config
+) -> None:
+    """Which user keeps a shared number is a human decision: 0008 must stop, not delete."""
+    insert = text(
+        "INSERT INTO users (id, full_names, id_number_hash, id_number_encrypted, date_of_birth,"
+        " status, verification_ref, verified_at) VALUES (:id, 'Thabo Mokoena', :hash, :encrypted,"
+        " '1980-01-01', 'active', 'test', now())"
+    )
+    method = text(
+        "INSERT INTO payout_methods (id, user_id, kind, bank_id, shap_id, shap_name, verification_ref,"
+        " verified_at, is_default) VALUES (:id, :user_id, 'shap_id', 'capitec', '+27825551234',"
+        " 'T. Mokoena', 'test', now(), true)"
+    )
+    try:
+        command.downgrade(alembic_config, "0007_vouchers_idempotency_key")
+        with clean_db.begin() as conn:
+            for n in (1, 2):
+                user_id = uuid.uuid4()
+                pii, id_number = PiiCipher(TEST_PII_KEY), f"800101500{n}087"
+                conn.execute(
+                    insert,
+                    {
+                        "id": user_id,
+                        "hash": pii.lookup_hash(id_number, SA_ID),
+                        "encrypted": pii.encrypt(id_number, SA_ID),
+                    },
+                )
+                conn.execute(method, {"id": uuid.uuid4(), "user_id": user_id})
+        with pytest.raises(RuntimeError, match="1 PayShap number"):
+            command.upgrade(alembic_config, "head")
+        with clean_db.connect() as conn:
+            assert conn.execute(text("SELECT to_regclass('uq_payout_methods_shap_id')")).scalar_one() is None
+            assert conn.execute(text("SELECT count(*) FROM payout_methods")).scalar_one() == 2
+    finally:
+        with clean_db.begin() as conn:
+            conn.execute(text("TRUNCATE payout_methods, user_sessions, users CASCADE"))
+        command.upgrade(alembic_config, "head")

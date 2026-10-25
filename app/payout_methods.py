@@ -8,11 +8,18 @@ a saved method is never just an unverified claim:
   directory while there is no bank connection). Not registered for PayShap is
   the directory's own refusal (shapid_not_found, ...). Registered, but the
   masked name on it is not this user (app/names.py): shapid_name_mismatch.
-  Either way the app offers "use a bank account instead".
+  Either way the app offers "use a bank account instead". Already saved by
+  another user: shapid_already_linked.
 - Bank account: verified to exist and to belong to the user's own ID number
   (app/account_verification.py). The holder is always the registered name;
   the user cannot type someone else's. The number is stored as ciphertext
   with a keyed hash (app/pii.py) and decrypted only to instruct a payout.
+  Already saved by another user: account_already_linked.
+
+One owner each: a PayShap number or bank account pays into one person's
+account, so only one user may save it (migration 0008). Checked before
+inserting, so the user gets the reason; the unique index decides a race
+between two users adding it at once. Removing a method frees it.
 
 A user may keep up to MAX_METHODS. Exactly one is the default (the "Paying
 into" line in the app) whenever there is at least one: the first one added
@@ -36,6 +43,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.account_verification import AccountRefused, AccountVerifier
@@ -127,6 +135,9 @@ class PayoutMethodService:
         )
         if existing is not None:
             return self._finish(session, user_id, existing, make_default)
+        if self._held_by_another(session, user_id, PayoutMethod.shap_id == shap_id):
+            session.rollback()
+            raise Refused("shapid_already_linked")
         method = PayoutMethod(
             user_id=user_id,
             kind=PayoutMethodKind.SHAP_ID,
@@ -136,7 +147,7 @@ class PayoutMethodService:
             verification_ref="shapid-directory",
             verified_at=self.now(),
         )
-        return self._insert(session, user_id, method, make_default)
+        return self._insert(session, user_id, method, make_default, "shapid_already_linked")
 
     def add_account(
         self,
@@ -168,6 +179,9 @@ class PayoutMethodService:
         )
         if existing is not None:
             return self._finish(session, user_id, existing, make_default)
+        if self._held_by_another(session, user_id, PayoutMethod.account_number_hash == account_hash):
+            session.rollback()
+            raise Refused("account_already_linked")
         method = PayoutMethod(
             user_id=user_id,
             kind=PayoutMethodKind.ACCOUNT,
@@ -179,10 +193,15 @@ class PayoutMethodService:
             verification_ref=verification_ref,
             verified_at=self.now(),
         )
-        return self._insert(session, user_id, method, make_default)
+        return self._insert(session, user_id, method, make_default, "account_already_linked")
 
     def _insert(
-        self, session: Session, user_id: uuid.UUID, method: PayoutMethod, make_default: bool
+        self,
+        session: Session,
+        user_id: uuid.UUID,
+        method: PayoutMethod,
+        make_default: bool,
+        taken_reason: str,
     ) -> PayoutMethodView:
         count = session.scalar(
             select(func.count()).select_from(PayoutMethod).where(PayoutMethod.user_id == user_id)
@@ -190,9 +209,23 @@ class PayoutMethodService:
         if count and count >= MAX_METHODS:
             session.rollback()
             raise Refused("payout_method_limit")
-        session.add(method)
-        session.flush()
+        try:
+            with session.begin_nested():
+                session.add(method)
+        except IntegrityError:
+            # Another user saved this number or account between our check and
+            # the insert: the one-owner index (migration 0008) decided.
+            session.rollback()
+            raise Refused(taken_reason) from None
         return self._finish(session, user_id, method, make_default or not count)
+
+    def _held_by_another(self, session: Session, user_id: uuid.UUID, matches: Any) -> bool:
+        return (
+            session.scalar(
+                select(PayoutMethod.id).where(matches, PayoutMethod.user_id != user_id).limit(1)
+            )
+            is not None
+        )
 
     def _finish(
         self, session: Session, user_id: uuid.UUID, method: PayoutMethod, make_default: bool
